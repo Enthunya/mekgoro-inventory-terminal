@@ -1,5 +1,8 @@
 streamlit
-
 pandas
-
-pillow
+sqlite3
+Pillow
+pytesseract
+pdf2image
+google-auth
+google-api-python-client
