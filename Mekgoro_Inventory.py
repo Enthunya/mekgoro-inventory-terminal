@@ -6,15 +6,14 @@ import hashlib
 from datetime import datetime
 
 # =========================================================
-# 1. BRANDING & STYLE
+# 1. BRANDING & DEVICE OPTIMIZATION
 # =========================================================
 st.set_page_config(page_title="Mekgoro Inventory", layout="centered")
 
 st.markdown("""
 <style>
     .stButton > button { width: 100%; height: 3.5rem; border-radius: 12px; font-weight: bold; background-color: #1E3A8A; color: white; }
-    .stSelectbox label, .stTextInput label { font-weight: bold; font-size: 15px; }
-    .stAlert { border-radius: 10px; }
+    .stMetric { background-color: #f0f2f6; padding: 10px; border-radius: 10px; border: 1px solid #dcdfe4; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -22,7 +21,7 @@ if os.path.exists("logo.png"):
     st.image("logo.png", width=180)
 
 # =========================================================
-# 2. SECURITY
+# 2. SECURITY (MASTER PASSWORD)
 # =========================================================
 def hash_pwd(pwd):
     return hashlib.sha256(pwd.encode()).hexdigest()
@@ -46,14 +45,15 @@ if not st.session_state.auth:
     st.stop()
 
 # =========================================================
-# 3. DATABASE
+# 3. DATABASE (ASSETS NOW INCLUDE UNIT_COST)
 # =========================================================
 db = sqlite3.connect("mekgoro_inventory.db", check_same_thread=False)
 
 def init_db():
-    db.execute("CREATE TABLE IF NOT EXISTS assets (item_name TEXT PRIMARY KEY, qty INTEGER)")
+    db.execute("""CREATE TABLE IF NOT EXISTS assets 
+               (item_name TEXT PRIMARY KEY, qty INTEGER, unit_cost REAL DEFAULT 0)""")
     db.execute("CREATE TABLE IF NOT EXISTS supplier_memory (supplier TEXT, item_name TEXT, UNIQUE(supplier, item_name))")
-    db.execute("CREATE TABLE IF NOT EXISTS logs (type TEXT, item_name TEXT, qty INTEGER, ref TEXT, user TEXT, timestamp TEXT, supplier TEXT)")
+    db.execute("CREATE TABLE IF NOT EXISTS logs (type TEXT, item_name TEXT, qty INTEGER, ref TEXT, user TEXT, timestamp TEXT, supplier TEXT, cost REAL)")
     db.commit()
 
 init_db()
@@ -65,26 +65,37 @@ st.caption(f"👤 Active User: {st.session_state.user}")
 mode = st.radio("", ["📊 Stock", "📥 Receive", "📤 Dispatch", "🕒 History"], horizontal=True)
 
 # ---------------------------------------------------------
-# TAB 1: STOCK VIEW
+# TAB 1: STOCK VIEW (WITH FINANCIALS)
 # ---------------------------------------------------------
 if mode == "📊 Stock":
     st.subheader("Warehouse Inventory Status")
-    df = pd.read_sql("SELECT item_name as 'Item Description', qty as 'Stock Count' FROM assets ORDER BY item_name", db)
+    
+    # Calculate total warehouse value
+    df = pd.read_sql("SELECT item_name, qty, unit_cost, (qty * unit_cost) as total_val FROM assets ORDER BY item_name", db)
+    
     if df.empty:
         st.info("Warehouse is empty.")
     else:
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        total_wh_value = df['total_val'].sum()
+        st.metric("Total Warehouse Value", f"R {total_wh_value:,.2f}")
+        
+        # Display clean table for partners
+        display_df = df.rename(columns={
+            "item_name": "Item Description",
+            "qty": "Stock",
+            "unit_cost": "Unit Cost (R)",
+            "total_val": "Total Value (R)"
+        })
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
 
 # ---------------------------------------------------------
-# TAB 2: RECEIVE (REGULAR STOCK VS NEW STOCK)
+# TAB 2: RECEIVE (UPDATING QUANTITY AND PRICE)
 # ---------------------------------------------------------
 elif mode == "📥 Receive":
     st.subheader("New Stock Entry")
     
-    # 1. Choose Supplier (Existing or New)
     existing_suppliers = pd.read_sql("SELECT DISTINCT supplier FROM supplier_memory", db)['supplier'].tolist()
-    
-    is_new_vendor = st.checkbox("➕ Add a New Supplier (First time using them)")
+    is_new_vendor = st.checkbox("➕ Add a New Supplier")
     
     if is_new_vendor or not existing_suppliers:
         vendor_name = st.text_input("Type New Supplier Name")
@@ -92,46 +103,40 @@ elif mode == "📥 Receive":
         vendor_name = st.selectbox("Select Existing Supplier", sorted(existing_suppliers))
     
     if vendor_name:
-        # 2. Predictive List: Items we have bought from this specific supplier before
         history_items = pd.read_sql("SELECT item_name FROM supplier_memory WHERE supplier = ?", db, params=(vendor_name,))['item_name'].tolist()
         
         with st.form("in_form", clear_on_submit=True):
             st.markdown(f"### Receiving from: **{vendor_name}**")
             
-            # Choice A: Pick from Regular Stock
-            if history_items:
-                p_name = st.selectbox("Option A: Pick from Regular Stock (Items bought before)", ["-- Select --"] + sorted(history_items))
-            else:
-                p_name = "-- Select --"
-                st.info("No items in memory for this supplier yet.")
-            
-            # Choice B: Type New Item
-            manual = st.text_input("Option B: Enter New Stock Item (If not in list above)")
-            
-            # Logic to decide which name to use
+            p_name = st.selectbox("Option A: Pick Regular Stock", ["-- Select --"] + sorted(history_items)) if history_items else "-- Select --"
+            manual = st.text_input("Option B: Enter New Stock Item")
             final_name = manual.strip() if manual else p_name
             
             st.divider()
-            c1, c2 = st.columns(2)
-            qty = c1.number_input("Quantity Received", min_value=1, step=1)
-            ref = c2.text_input("Invoice / Ref #")
+            c1, c2, c3 = st.columns(3)
+            qty = c1.number_input("Qty Received", min_value=1, step=1)
+            cost = c2.number_input("Unit Cost (R)", min_value=0.0, step=0.01)
+            ref = c3.text_input("Invoice / Ref #")
             
             if st.form_submit_button("Confirm & Update Warehouse"):
                 if not final_name or final_name == "-- Select --":
-                    st.error("Please select an existing item or type a new one.")
+                    st.error("Please provide an item name.")
                 else:
-                    # Update Stock Count
-                    db.execute("INSERT INTO assets (item_name, qty) VALUES (?, ?) ON CONFLICT(item_name) DO UPDATE SET qty = qty + excluded.qty", (final_name, int(qty)))
-                    # Link Supplier and Item for next time
+                    # UPDATING REPEAT STOCK: Adds Qty and Updates to the LATEST Cost
+                    db.execute("""INSERT INTO assets (item_name, qty, unit_cost) VALUES (?, ?, ?) 
+                               ON CONFLICT(item_name) DO UPDATE SET 
+                               qty = qty + excluded.qty,
+                               unit_cost = excluded.unit_cost""", (final_name, int(qty), cost))
+                    
                     db.execute("INSERT OR IGNORE INTO supplier_memory VALUES (?, ?)", (vendor_name, final_name))
-                    # Record the Log
-                    db.execute("INSERT INTO logs VALUES ('IN', ?, ?, ?, ?, ?, ?)", (final_name, int(qty), ref, st.session_state.user, datetime.now().strftime("%Y-%m-%d %H:%M"), vendor_name))
+                    db.execute("INSERT INTO logs VALUES ('IN', ?, ?, ?, ?, ?, ?, ?)", 
+                               (final_name, int(qty), ref, st.session_state.user, datetime.now().strftime("%Y-%m-%d %H:%M"), vendor_name, cost))
                     db.commit()
-                    st.success(f"Stock Updated! Added {qty} units of {final_name}")
+                    st.success(f"Stock Updated! Warehouse value increased by R {qty * cost:,.2f}")
                     st.rerun()
 
 # ---------------------------------------------------------
-# TABS 3 & 4: DISPATCH & HISTORY (STAY THE SAME)
+# TABS 3 & 4: DISPATCH & HISTORY
 # ---------------------------------------------------------
 elif mode == "📤 Dispatch":
     st.subheader("Dispatch to Site")
@@ -147,9 +152,8 @@ elif mode == "📤 Dispatch":
             site = st.text_input("Project / Site Name")
             if st.form_submit_button("Confirm Dispatch"):
                 db.execute("UPDATE assets SET qty = qty - ? WHERE item_name = ?", (int(d_qty), choice))
-                db.execute("INSERT INTO logs VALUES ('OUT', ?, ?, ?, ?, ?, 'INTERNAL')", (choice, int(d_qty), site, st.session_state.user, datetime.now().strftime("%Y-%m-%d %H:%M")))
+                db.execute("INSERT INTO logs VALUES ('OUT', ?, ?, ?, ?, ?, 'INTERNAL', 0)", (choice, int(d_qty), site, st.session_state.user, datetime.now().strftime("%Y-%m-%d %H:%M"), "INTERNAL"))
                 db.commit()
-                st.success(f"Successfully dispatched to {site}")
                 st.rerun()
 
 elif mode == "🕒 History":
