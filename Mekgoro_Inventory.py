@@ -10,13 +10,34 @@ from googleapiclient.http import MediaFileUpload
 # --- 1. CONFIGURATION ---
 st.set_page_config(page_title="Mekgoro Terminal", page_icon="🏗️", layout="wide")
 
-# --- 2. DATABASE ---
+# --- 2. DATABASE INITIALIZATION ---
 db = sqlite3.connect("mekgoro_database.db", check_same_thread=False)
 
 def init_db():
-    # Assets tracks physical stock; Logs tracks every movement
-    db.execute("CREATE TABLE IF NOT EXISTS assets (item_name TEXT PRIMARY KEY, qty_on_hand INTEGER, last_update TEXT)")
-    db.execute("CREATE TABLE IF NOT EXISTS logs (type TEXT, item_name TEXT, qty INTEGER, ref_doc TEXT, user TEXT, timestamp TEXT, status TEXT, supplier TEXT)")
+    # Create tables if they don't exist
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS assets (
+            item_name TEXT PRIMARY KEY, 
+            qty_on_hand INTEGER, 
+            last_update TEXT
+        )
+    """)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS logs (
+            type TEXT, 
+            item_name TEXT, 
+            qty INTEGER, 
+            ref_doc TEXT, 
+            user TEXT, 
+            timestamp TEXT, 
+            status TEXT, 
+            supplier TEXT
+        )
+    """)
+    # Add a starting row if empty to prevent 'DatabaseError' on select
+    check = db.execute("SELECT count(*) FROM assets").fetchone()[0]
+    if check == 0:
+        db.execute("INSERT INTO assets VALUES ('Example: Cement 50kg', 0, 'Initial Setup')")
     db.commit()
 
 init_db()
@@ -38,21 +59,22 @@ def upload_to_drive(file_obj, file_name):
     with open(temp_path, "wb") as f:
         f.write(file_obj.getbuffer())
     
+    # NOTE: You can add 'parents': ['YOUR_FOLDER_ID'] here if you want a specific folder
     file_metadata = {'name': file_name}
     media = MediaFileUpload(temp_path, resumable=True)
     file = drive_service.files().create(body=file_metadata, media_body=media, fields='id, webViewLink').execute()
     
-    os.remove(temp_path) # Clean up
+    os.remove(temp_path) 
     return file.get('webViewLink')
 
-# --- 4. THE SMART WORKFLOW ---
+# --- 4. APP INTERFACE ---
 st.title("🏗️ Mekgoro Smart Inventory System")
 
-tab1, tab2, tab3 = st.tabs(["📥 Add Stock (Receipts)", "📤 Process P.O. (Client Orders)", "📋 Warehouse Ledger"])
+tab1, tab2, tab3 = st.tabs(["📥 Add Stock (Inbound)", "📤 Process P.O. (Outbound)", "📋 Warehouse Ledger"])
 
 with tab1:
     st.subheader("Add Stock to Warehouse")
-    with st.form("inbound"):
+    with st.form("inbound_form"):
         supplier = st.text_input("Supplier Name")
         item = st.text_input("Item Name (e.g., Cement 50kg)")
         qty = st.number_input("Quantity Received", min_value=1)
@@ -60,36 +82,50 @@ with tab1:
         
         if st.form_submit_button("Confirm Stock Entry"):
             now = datetime.now().strftime("%Y-%m-%d %H:%M")
-            link = upload_to_drive(receipt, receipt.name) if receipt else "Manual"
+            link = upload_to_drive(receipt, receipt.name) if receipt else "No Document"
             
-            db.execute("INSERT INTO assets (item_name, qty_on_hand, last_update) VALUES (?,?,?) ON CONFLICT(item_name) DO UPDATE SET qty_on_hand = qty_on_hand + ?, last_update = ?", (item, qty, now, qty, now))
-            db.execute("INSERT INTO logs VALUES (?,?,?,?,?,?,?,?)", ("INCOMING", item, qty, link, "User", now, "Added", supplier))
+            # Logic: Update existing item qty OR insert new
+            db.execute("""
+                INSERT INTO assets (item_name, qty_on_hand, last_update) 
+                VALUES (?,?,?) 
+                ON CONFLICT(item_name) DO UPDATE SET 
+                qty_on_hand = qty_on_hand + excluded.qty_on_hand, 
+                last_update = excluded.last_update
+            """, (item, qty, now))
+            
+            db.execute("INSERT INTO logs VALUES (?,?,?,?,?,?,?,?)", 
+                       ("INCOMING", item, qty, link, "Admin", now, "Verified", supplier))
             db.commit()
-            st.success(f"✅ Added {qty} {item} to stock. Document saved to Drive.")
+            st.success(f"✅ Successfully added {qty} {item}. Record stored.")
 
 with tab2:
     st.subheader("Process & Check Client P.O.")
-    with st.form("outbound"):
-        po_item = st.text_input("Item requested")
-        po_qty = st.number_input("Quantity requested", min_value=1)
-        po_file = st.file_uploader("Upload Client P.O.", type=['pdf'])
+    # Pull current items for a dropdown
+    item_list = [row[0] for row in db.execute("SELECT item_name FROM assets").fetchall()]
+    
+    with st.form("outbound_form"):
+        po_item = st.selectbox("Select Item in Stock", item_list)
+        po_qty = st.number_input("Quantity Requested on P.O.", min_value=1)
         
-        if st.form_submit_button("Verify Stock Availability"):
+        if st.form_submit_button("Check Availability"):
             res = db.execute("SELECT qty_on_hand FROM assets WHERE item_name = ?", (po_item,)).fetchone()
-            current = res[0] if res else 0
+            current_stock = res[0] if res else 0
             
-            if current >= po_qty:
-                st.success(f"✅ AVAILABLE: You have {current} in stock. Ready to ship.")
-                if st.checkbox("Confirm Shipment (Subtract Stock)"):
+            if current_stock >= po_qty:
+                st.success(f"✅ STOCK AVAILABLE: You have {current_stock} units. You can safely process this P.O.")
+                if st.checkbox("Ship now and subtract from inventory?"):
+                    new_qty = current_stock - po_qty
                     now = datetime.now().strftime("%Y-%m-%d %H:%M")
-                    db.execute("UPDATE assets SET qty_on_hand = qty_on_hand - ? WHERE item_name = ?", (po_qty, po_item))
+                    db.execute("UPDATE assets SET qty_on_hand = ?, last_update = ? WHERE item_name = ?", (new_qty, now, po_item))
                     db.commit()
-                    st.info("Stock updated. Order processed.")
+                    st.info("Stock updated and logged.")
             else:
-                shortage = po_qty - current
-                st.error(f"🚨 INSUFFICIENT STOCK: You only have {current}. You need to buy {shortage} more {po_item}.")
+                st.error(f"🚨 SHORTAGE: You only have {current_stock} units. You need {po_qty - current_stock} more to fulfill this order.")
 
 with tab3:
-    st.subheader("Warehouse Status")
-    ledger = pd.read_sql("SELECT item_name as 'Item', qty_on_hand as 'In Stock', last_update as 'Last Activity' FROM assets", db)
-    st.dataframe(ledger, use_container_width=True)
+    st.subheader("Current Warehouse Status")
+    # Using the exact aliases the UI expects to prevent DatabaseErrors
+    query = "SELECT item_name AS 'Item Name', qty_on_hand AS 'In Stock', last_update AS 'Last Activity' FROM assets"
+    ledger_df = pd.read_sql(query, db)
+    st.dataframe(ledger_df, use_container_width=True)
+
