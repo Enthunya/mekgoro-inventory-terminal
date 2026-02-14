@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import os
+import io
 from datetime import datetime
 
 # --- 1. CONFIG & DATABASE ---
@@ -9,30 +10,25 @@ st.set_page_config(page_title="Mekgoro Inventory", layout="wide")
 db = sqlite3.connect("mekgoro_database.db", check_same_thread=False)
 
 def init_db():
-    # Tables for stock and logs
     db.execute("CREATE TABLE IF NOT EXISTS assets (item_name TEXT PRIMARY KEY, qty REAL, last_update TEXT)")
     db.execute("CREATE TABLE IF NOT EXISTS logs (type TEXT, item_name TEXT, qty REAL, ref_no TEXT, user TEXT, timestamp TEXT)")
     db.commit()
 
-    # --- AUTO-LOAD FEATURE ---
-    # Check if the database is empty
+    # AUTO-LOAD: Uses the Cleaned CSV if the database is empty
     cursor = db.cursor()
     cursor.execute("SELECT COUNT(*) FROM assets")
     if cursor.fetchone()[0] == 0:
-        # If empty, try to load your Sage List
-        csv_path = "ItemListingReport.csv"
+        # We try to load the cleaned version first
+        csv_path = "Cleaned_Sage_Inventory.csv"
         if os.path.exists(csv_path):
             try:
-                # Reading the Sage CSV (skipping the 'sep=,' line)
-                df_sage = pd.read_csv(csv_path, skiprows=1)
-                # Clean descriptions and set Qty to 0 as requested
-                unique_items = df_sage['Description'].dropna().unique()
-                for item in unique_items:
-                    db.execute("INSERT OR IGNORE INTO assets VALUES (?, 0, ?)",
-                               (item, datetime.now().strftime("%Y-%m-%d %H:%M")))
+                df_clean = pd.read_csv(csv_path)
+                for _, row in df_clean.iterrows():
+                    db.execute("INSERT OR IGNORE INTO assets VALUES (?, ?, ?)",
+                               (row['Item Description'], row['Quantity'], datetime.now().strftime("%Y-%m-%d %H:%M")))
                 db.commit()
-            except Exception as e:
-                pass # Silently fail if file format is wrong on startup
+            except:
+                pass
 
 init_db()
 
@@ -47,36 +43,51 @@ if "user" not in st.session_state:
     st.stop()
 
 # --- 3. MAIN TERMINAL ---
-st.title(f"🏗️ Mekgoro Terminal | Active User: {st.session_state.user}")
+st.title(f"🏗️ Mekgoro Terminal | User: {st.session_state.user}")
 tab1, tab2, tab3 = st.tabs(["📊 Warehouse Ledger", "📥 Receive Stock", "🕒 Activity Logs"])
 
 with tab1:
     st.subheader("Current Stock Levels")
-    # Search box for the ledger
-    search_query = st.text_input("🔍 Search Inventory (e.g., 'Cable Ties' or 'Cement')", "")
+    search_query = st.text_input("🔍 Search Inventory", "")
     
-    df = pd.read_sql("SELECT * FROM assets ORDER BY item_name ASC", db)
+    df = pd.read_sql("SELECT item_name as 'Item Description', qty as 'Quantity', last_update as 'Last Updated' FROM assets ORDER BY item_name ASC", db)
     if search_query:
-        df = df[df['item_name'].str.contains(search_query, case=False, na=False)]
+        df = df[df['Item Description'].str.contains(search_query, case=False, na=False)]
     
     st.dataframe(df, use_container_width=True, height=400)
     
-    # Manual Export for Ndule
-    csv = df.to_csv(index=False).encode('utf-8')
-    st.download_button("📥 Download Report (CSV)", csv, f"Mekgoro_Stock_{datetime.now().strftime('%Y%m%d')}.csv", "text/csv")
+    # --- EXPORT OPTIONS ---
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # EXCEL EXPORT
+        buffer_xlsx = io.BytesIO()
+        with pd.ExcelWriter(buffer_xlsx, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Inventory')
+        st.download_button(
+            label="📥 Download as Excel (.xlsx)",
+            data=buffer_xlsx.getvalue(),
+            file_name=f"Mekgoro_Inventory_{datetime.now().strftime('%Y%m%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+    with col2:
+        # CSV EXPORT
+        buffer_csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📄 Download as CSV (.csv)",
+            data=buffer_csv,
+            file_name=f"Mekgoro_Inventory_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv"
+        )
 
 with tab2:
     st.subheader("Record Incoming Material")
-    # Get all 1,990+ items for the dropdown
     all_items = pd.read_sql("SELECT item_name FROM assets ORDER BY item_name ASC", db)['item_name'].tolist()
     
     with st.form("add_stock_form"):
-        # Tshepo can type here to find "Cable Ties" instantly
         item_selection = st.selectbox("Search/Select Material", ["Other (Add New Item)"] + all_items)
-        
-        new_item_name = ""
-        if item_selection == "Other (Add New Item)":
-            new_item_name = st.text_input("New Item Name:")
+        new_item_name = st.text_input("New Item Name:") if item_selection == "Other (Add New Item)" else ""
             
         amt = st.number_input("Quantity Received", min_value=0.0, step=1.0)
         ref = st.text_input("Delivery Note / Invoice #")
@@ -94,5 +105,5 @@ with tab2:
 
 with tab3:
     st.subheader("Recent Activity")
-    logs_df = pd.read_sql("SELECT * FROM logs ORDER BY timestamp DESC", db)
+    logs_df = pd.read_sql("SELECT timestamp as 'Time', user as 'Staff', item_name as 'Item', qty as 'Qty', ref_no as 'Ref' FROM logs ORDER BY timestamp DESC", db)
     st.table(logs_df.head(50))
