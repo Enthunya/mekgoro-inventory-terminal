@@ -1,8 +1,10 @@
 streamlit
 pandas
-google-api-python-client
-google-auth
-google-auth-oauthlib
-google-auth-httplib2
 Pillow
+pytesseract
+pdf2image
+google-auth
+google-api-python-client
+openpyxl
+
 
