@@ -7,25 +7,42 @@ from datetime import datetime
 from PIL import Image
 import pytesseract
 
-# --- 1. CONFIG & DATABASE ---
+# --- 1. CONFIG & REPAIRABLE DATABASE ---
 st.set_page_config(page_title="Mekgoro Inventory", layout="wide")
-db = sqlite3.connect("mekgoro_database.db", check_same_thread=False)
+# Using a versioned DB name to ensure a fresh start if needed
+db = sqlite3.connect("mekgoro_v2.db", check_same_thread=False)
 
 def init_db():
+    # Create tables if they don't exist
     db.execute("CREATE TABLE IF NOT EXISTS assets (item_name TEXT PRIMARY KEY, qty REAL, last_update TEXT)")
     db.execute("CREATE TABLE IF NOT EXISTS logs (type TEXT, item_name TEXT, qty REAL, ref_no TEXT, user TEXT, timestamp TEXT)")
+    
+    # DATABASE REPAIR: Add 'ref_no' to logs if it's missing from an old version
+    try:
+        db.execute("ALTER TABLE logs ADD COLUMN ref_no TEXT")
+    except:
+        pass # Column already exists
+        
     db.commit()
 
-    # AUTO-LOAD: Pre-fills the system with your Sage items at 0 stock
+    # AUTO-LOAD: Pre-fills items from your Sage list at 0 stock
     cursor = db.cursor()
     cursor.execute("SELECT COUNT(*) FROM assets")
     if cursor.fetchone()[0] == 0:
-        if os.path.exists("Cleaned_Sage_Inventory.csv"):
-            df_clean = pd.read_csv("Cleaned_Sage_Inventory.csv")
-            for _, row in df_clean.iterrows():
-                db.execute("INSERT OR IGNORE INTO assets VALUES (?, ?, ?)",
-                           (row['Item Description'], row['Quantity'], datetime.now().strftime("%Y-%m-%d %H:%M")))
-            db.commit()
+        # Look for the cleaned file we generated
+        for file_name in ["Cleaned_Sage_Inventory.csv", "ItemListingReport.csv"]:
+            if os.path.exists(file_name):
+                try:
+                    df_clean = pd.read_csv(file_name, skiprows=1 if "Listing" in file_name else 0)
+                    col_name = 'Description' if 'Listing' in file_name else 'Item Description'
+                    unique_items = df_clean[col_name].dropna().unique()
+                    for item in unique_items:
+                        db.execute("INSERT OR IGNORE INTO assets VALUES (?, 0, ?)",
+                                   (item, datetime.now().strftime("%Y-%m-%d %H:%M")))
+                    db.commit()
+                    break
+                except:
+                    continue
 
 init_db()
 
@@ -47,13 +64,15 @@ with tab1:
     st.subheader("Current Stock Levels")
     search_query = st.text_input("🔍 Search Inventory", "")
     
+    # Safely read the database
     df = pd.read_sql("SELECT item_name as 'Item Description', qty as 'Quantity', last_update as 'Last Updated' FROM assets ORDER BY item_name ASC", db)
+    
     if search_query:
         df = df[df['Item Description'].str.contains(search_query, case=False, na=False)]
     
     st.dataframe(df, use_container_width=True, height=400)
     
-    # Export as Excel
+    # Download as Excel for Ndule
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Inventory')
@@ -63,15 +82,6 @@ with tab2:
     st.subheader("Record Incoming Material")
     all_items = pd.read_sql("SELECT item_name FROM assets ORDER BY item_name ASC", db)['item_name'].tolist()
     
-    # Optional OCR for Receipts
-    with st.expander("📷 Scan Receipt/Invoice (Optional)"):
-        img_file = st.file_uploader("Upload image of receipt", type=["jpg", "png", "jpeg"])
-        if img_file:
-            img = Image.open(img_file)
-            st.image(img, caption="Scanning...", width=300)
-            text = pytesseract.image_to_string(img)
-            st.text_area("Detected Text:", text)
-
     with st.form("add_stock_form"):
         item_selection = st.selectbox("Search/Select Material", ["Other (Add New Item)"] + all_items)
         new_item_name = st.text_input("New Item Name:") if item_selection == "Other (Add New Item)" else ""
@@ -91,5 +101,8 @@ with tab2:
 
 with tab3:
     st.subheader("Recent Activity")
-    logs_df = pd.read_sql("SELECT timestamp as 'Time', user as 'Staff', item_name as 'Item', qty as 'Qty', ref_no as 'Ref' FROM logs ORDER BY timestamp DESC", db)
-    st.table(logs_df.head(50))
+    try:
+        logs_df = pd.read_sql("SELECT timestamp as 'Time', user as 'Staff', item_name as 'Item', qty as 'Qty', ref_no as 'Ref' FROM logs ORDER BY timestamp DESC", db)
+        st.table(logs_df.head(50))
+    except:
+        st.info("No logs recorded yet.")
