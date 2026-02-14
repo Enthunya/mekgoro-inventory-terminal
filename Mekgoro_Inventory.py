@@ -60,3 +60,4 @@ with tab3:
     st.subheader("Current Stock")
     data = pd.read_sql("SELECT item_name as 'Item', qty_on_hand as 'In Stock' FROM assets", db)
     st.dataframe(data, use_container_width=True)
+
