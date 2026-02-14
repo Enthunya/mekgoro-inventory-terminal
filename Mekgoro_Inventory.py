@@ -4,6 +4,8 @@ import sqlite3
 import os
 import io
 from datetime import datetime
+from PIL import Image
+import pytesseract
 
 # --- 1. CONFIG & DATABASE ---
 st.set_page_config(page_title="Mekgoro Inventory", layout="wide")
@@ -14,21 +16,16 @@ def init_db():
     db.execute("CREATE TABLE IF NOT EXISTS logs (type TEXT, item_name TEXT, qty REAL, ref_no TEXT, user TEXT, timestamp TEXT)")
     db.commit()
 
-    # AUTO-LOAD: Uses the Cleaned CSV if the database is empty
+    # AUTO-LOAD: Pre-fills the system with your Sage items at 0 stock
     cursor = db.cursor()
     cursor.execute("SELECT COUNT(*) FROM assets")
     if cursor.fetchone()[0] == 0:
-        # We try to load the cleaned version first
-        csv_path = "Cleaned_Sage_Inventory.csv"
-        if os.path.exists(csv_path):
-            try:
-                df_clean = pd.read_csv(csv_path)
-                for _, row in df_clean.iterrows():
-                    db.execute("INSERT OR IGNORE INTO assets VALUES (?, ?, ?)",
-                               (row['Item Description'], row['Quantity'], datetime.now().strftime("%Y-%m-%d %H:%M")))
-                db.commit()
-            except:
-                pass
+        if os.path.exists("Cleaned_Sage_Inventory.csv"):
+            df_clean = pd.read_csv("Cleaned_Sage_Inventory.csv")
+            for _, row in df_clean.iterrows():
+                db.execute("INSERT OR IGNORE INTO assets VALUES (?, ?, ?)",
+                           (row['Item Description'], row['Quantity'], datetime.now().strftime("%Y-%m-%d %H:%M")))
+            db.commit()
 
 init_db()
 
@@ -56,39 +53,28 @@ with tab1:
     
     st.dataframe(df, use_container_width=True, height=400)
     
-    # --- EXPORT OPTIONS ---
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        # EXCEL EXPORT
-        buffer_xlsx = io.BytesIO()
-        with pd.ExcelWriter(buffer_xlsx, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, sheet_name='Inventory')
-        st.download_button(
-            label="📥 Download as Excel (.xlsx)",
-            data=buffer_xlsx.getvalue(),
-            file_name=f"Mekgoro_Inventory_{datetime.now().strftime('%Y%m%d')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-
-    with col2:
-        # CSV EXPORT
-        buffer_csv = df.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📄 Download as CSV (.csv)",
-            data=buffer_csv,
-            file_name=f"Mekgoro_Inventory_{datetime.now().strftime('%Y%m%d')}.csv",
-            mime="text/csv"
-        )
+    # Export as Excel
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Inventory')
+    st.download_button("📥 Download as Excel", buffer.getvalue(), f"Mekgoro_Stock_{datetime.now().strftime('%Y%m%d')}.xlsx")
 
 with tab2:
     st.subheader("Record Incoming Material")
     all_items = pd.read_sql("SELECT item_name FROM assets ORDER BY item_name ASC", db)['item_name'].tolist()
     
+    # Optional OCR for Receipts
+    with st.expander("📷 Scan Receipt/Invoice (Optional)"):
+        img_file = st.file_uploader("Upload image of receipt", type=["jpg", "png", "jpeg"])
+        if img_file:
+            img = Image.open(img_file)
+            st.image(img, caption="Scanning...", width=300)
+            text = pytesseract.image_to_string(img)
+            st.text_area("Detected Text:", text)
+
     with st.form("add_stock_form"):
         item_selection = st.selectbox("Search/Select Material", ["Other (Add New Item)"] + all_items)
         new_item_name = st.text_input("New Item Name:") if item_selection == "Other (Add New Item)" else ""
-            
         amt = st.number_input("Quantity Received", min_value=0.0, step=1.0)
         ref = st.text_input("Delivery Note / Invoice #")
         
