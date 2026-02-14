@@ -6,33 +6,39 @@ from datetime import datetime
 
 # --- 1. CONFIG & DATABASE ---
 st.set_page_config(page_title="Mekgoro Inventory", layout="wide")
-# Moving to v10 to ensure a clean slate
-db = sqlite3.connect("mekgoro_v10.db", check_same_thread=False)
+# Using v11 to reset the search logic
+db = sqlite3.connect("mekgoro_v11.db", check_same_thread=False)
 
 def init_db():
     db.execute("CREATE TABLE IF NOT EXISTS assets (item_name TEXT PRIMARY KEY, qty INTEGER, last_update TEXT)")
     db.execute("CREATE TABLE IF NOT EXISTS logs (type TEXT, item_name TEXT, qty INTEGER, ref_no TEXT, user TEXT, timestamp TEXT)")
     db.commit()
 
-    # AUTO-LOAD FROM FILE
+    # AUTO-LOAD FROM SAGE FILE
     cursor = db.cursor()
     cursor.execute("SELECT COUNT(*) FROM assets")
     if cursor.fetchone()[0] == 0:
-        # Check for your specific file names
         for f in ["ItemListingReport.csv", "ItemListingReport.xlsx"]:
             if os.path.exists(f):
                 try:
+                    # Sage CSVs usually have a 'sep=,' header, so we skip row 0
                     df = pd.read_excel(f) if f.endswith('.xlsx') else pd.read_csv(f, skiprows=1)
-                    # Use exact column names from your Sage file
-                    for _, row in df.iterrows():
-                        name = str(row['Description'])
-                        # Force absolute whole number
-                        initial_qty = int(abs(float(row['Qty on Hand'])))
-                        db.execute("INSERT OR IGNORE INTO assets VALUES (?, ?, ?)",
-                                   (name, initial_qty, datetime.now().strftime("%Y-%m-%d %H:%M")))
-                    db.commit()
-                    break
-                except:
+                    
+                    # Exact column matching for your Sage file
+                    if 'Description' in df.columns:
+                        for _, row in df.iterrows():
+                            name = str(row['Description']).strip()
+                            # Handle empty or NaN descriptions
+                            if name and name != 'nan':
+                                # Convert 'Qty on Hand' safely to integer
+                                q_val = row.get('Qty on Hand', 0)
+                                initial_qty = int(abs(float(q_val))) if pd.notnull(q_val) else 0
+                                
+                                db.execute("INSERT OR IGNORE INTO assets VALUES (?, ?, ?)",
+                                           (name, initial_qty, datetime.now().strftime("%Y-%m-%d %H:%M")))
+                        db.commit()
+                        break
+                except Exception as e:
                     continue
 
 init_db()
@@ -46,68 +52,83 @@ if "user" not in st.session_state:
         st.rerun()
     st.stop()
 
-# --- 3. TABS ---
+# --- 3. MAIN INTERFACE ---
 st.title(f"🏗️ Mekgoro Terminal | User: {st.session_state.user}")
 tab1, tab2, tab3, tab4 = st.tabs(["📊 Total Available", "📥 Purchases", "📤 Deliveries", "🕒 History"])
 
+# Helper function to get the current list
+def get_all_items():
+    return pd.read_sql("SELECT item_name, qty FROM assets ORDER BY item_name ASC", db)
+
 with tab1:
-    st.subheader("Warehouse Inventory")
-    # Diagnostic check
-    item_check = pd.read_sql("SELECT COUNT(*) as count FROM assets", db)['count'][0]
-    if item_check == 0:
-        st.error("🚨 System is empty! Ensure 'ItemListingReport.csv' is uploaded to GitHub.")
+    st.subheader("Warehouse Inventory Search")
+    search_main = st.text_input("🔍 Search for any item in the warehouse...", placeholder="Type here (e.g. Glove, Cable, Glue)")
+    df_all = get_all_items()
     
-    search = st.text_input("🔍 Search Inventory", "")
-    data = pd.read_sql("SELECT item_name as 'Item', qty as 'Total Available' FROM assets ORDER BY item_name ASC", db)
-    if search:
-        data = data[data['Item'].str.contains(search, case=False, na=False)]
-    st.dataframe(data, use_container_width=True, height=400)
+    if search_main:
+        df_all = df_all[df_all['item_name'].str.contains(search_main, case=False, na=False)]
+    
+    st.dataframe(df_all.rename(columns={'item_name': 'Description', 'qty': 'Stock Level'}), use_container_width=True, height=500)
 
 with tab2:
     st.subheader("📥 Record New Purchases")
-    items = pd.read_sql("SELECT item_name FROM assets ORDER BY item_name ASC", db)['item_name'].tolist()
-    if not items:
-        st.warning("No items available to select.")
+    search_in = st.text_input("🔍 Type to find item bought...", key="search_in")
+    df_in = get_all_items()
+    
+    # Filter the list based on search
+    filtered_in = df_in['item_name'].tolist()
+    if search_in:
+        filtered_in = [x for x in filtered_in if search_in.lower() in x.lower()]
+    
+    if not filtered_in:
+        st.warning("No matching items found. Please check your spelling.")
     else:
-        with st.form("in_form"):
-            choice = st.selectbox("Item Description", items)
-            qty_in = st.number_input("Quantity Received", min_value=1, step=1)
-            ref = st.text_input("Supplier Invoice #")
+        with st.form("purchase_form"):
+            choice = st.selectbox("Select exact item from results:", filtered_in)
+            qty_in = st.number_input("Quantity Received (Whole Number)", min_value=1, step=1, value=1)
+            ref = st.text_input("Supplier Invoice / Ref #")
             if st.form_submit_button("Add to Stock"):
-                db.execute("UPDATE assets SET qty = qty + ? WHERE item_name = ?", (qty_int := int(qty_in), choice))
+                db.execute("UPDATE assets SET qty = qty + ? WHERE item_name = ?", (int(qty_in), choice))
                 db.execute("INSERT INTO logs VALUES ('PURCHASE', ?, ?, ?, ?, ?)", 
-                           (choice, qty_int, ref, st.session_state.user, datetime.now().strftime("%Y-%m-%d %H:%M")))
+                           (choice, int(qty_in), ref, st.session_state.user, datetime.now().strftime("%Y-%m-%d %H:%M")))
                 db.commit()
-                st.success("Updated!")
+                st.success(f"Added {int(qty_in)} to stock.")
                 st.rerun()
 
 with tab3:
     st.subheader("📤 Record Site Deliveries")
-    items_df = pd.read_sql("SELECT item_name, qty FROM assets ORDER BY item_name ASC", db)
-    if items_df.empty:
-        st.warning("No items available to deliver.")
+    search_out = st.text_input("🔍 Type to find item for delivery...", key="search_out")
+    df_out = get_all_items()
+    
+    filtered_out = df_out['item_name'].tolist()
+    if search_out:
+        filtered_out = [x for x in filtered_out if search_out.lower() in x.lower()]
+    
+    if not filtered_out:
+        st.warning("No matching items found.")
     else:
-        with st.form("out_form"):
-            choice = st.selectbox("Select Item", items_df['item_name'].tolist())
-            # Safety check to avoid IndexError
-            current_row = items_df[items_df['item_name'] == choice]
-            current_bal = int(current_row['qty'].values[0]) if not current_row.empty else 0
+        with st.form("delivery_form"):
+            choice = st.selectbox("Select exact item:", filtered_out)
             
-            st.write(f"📦 **Total Available: {current_bal}**")
-            qty_out = st.number_input("Quantity to Dispatch", min_value=1, step=1)
+            # Safe balance lookup
+            current_bal = df_out[df_out['item_name'] == choice]['qty'].values[0]
+            st.write(f"📦 **Currently in Warehouse: {int(current_bal)}**")
+            
+            qty_out = st.number_input("Quantity to Dispatch (Whole Number)", min_value=1, step=1, value=1)
             project = st.text_input("Project / Site Name")
+            
             if st.form_submit_button("Confirm Dispatch"):
-                if (out_int := int(qty_out)) > current_bal:
-                    st.error(f"Insufficient stock! Only {current_bal} available.")
+                if int(qty_out) > current_bal:
+                    st.error(f"Cannot dispatch {int(qty_out)}. Only {int(current_bal)} available.")
                 else:
-                    db.execute("UPDATE assets SET qty = qty - ? WHERE item_name = ?", (out_int, choice))
+                    db.execute("UPDATE assets SET qty = qty - ? WHERE item_name = ?", (int(qty_out), choice))
                     db.execute("INSERT INTO logs VALUES ('DELIVERY', ?, ?, ?, ?, ?)", 
-                               (choice, out_int, project, st.session_state.user, datetime.now().strftime("%Y-%m-%d %H:%M")))
+                               (choice, int(qty_out), project, st.session_state.user, datetime.now().strftime("%Y-%m-%d %H:%M")))
                     db.commit()
-                    st.warning("Dispatched!")
+                    st.warning("Dispatched to site.")
                     st.rerun()
 
 with tab4:
-    st.subheader("Activity History")
-    logs = pd.read_sql("SELECT timestamp, type as 'Action', item_name, qty as 'Quantity', ref_no as 'Project/Ref', user FROM logs ORDER BY timestamp DESC", db)
+    st.subheader("Recent Activity History")
+    logs = pd.read_sql("SELECT timestamp, type as 'Action', item_name, CAST(qty AS INT) as 'Quantity', ref_no as 'Project/Ref', user FROM logs ORDER BY timestamp DESC", db)
     st.dataframe(logs, use_container_width=True)
