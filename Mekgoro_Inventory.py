@@ -2,123 +2,108 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import os
+import pdfplumber  # You must add this to your requirements.txt
 from datetime import datetime
 
-# --- 1. CONFIG & DIRECTORIES ---
+# --- 1. CONFIG ---
 st.set_page_config(page_title="Mekgoro Inventory", layout="wide")
-db = sqlite3.connect("mekgoro_v13.db", check_same_thread=False)
+db = sqlite3.connect("mekgoro_v15.db", check_same_thread=False)
 
-# Create a folder to save uploaded invoices/photos
 if not os.path.exists("uploads"):
     os.makedirs("uploads")
 
 def init_db():
-    # Added 'file_path' to track the invoice/photo
-    db.execute("""CREATE TABLE IF NOT EXISTS assets 
-                  (item_name TEXT PRIMARY KEY, qty INTEGER, last_update TEXT)""")
-    db.execute("""CREATE TABLE IF NOT EXISTS logs 
-                  (type TEXT, item_name TEXT, qty INTEGER, ref_no TEXT, 
-                   file_path TEXT, user TEXT, timestamp TEXT)""")
+    db.execute("CREATE TABLE IF NOT EXISTS assets (item_name TEXT PRIMARY KEY, qty INTEGER)")
+    db.execute("CREATE TABLE IF NOT EXISTS logs (type TEXT, item_name TEXT, qty INTEGER, ref_no TEXT, file_path TEXT, user TEXT, timestamp TEXT)")
     db.commit()
 
 init_db()
 
-# --- 2. LOGIN ---
+# --- 2. THE SCANNER ENGINE ---
+def scan_omnisurge_pdf(file):
+    items_found = []
+    with pdfplumber.open(file) as pdf:
+        for page in pdf.pages:
+            table = page.extract_table()
+            if table:
+                # Look for the row containing 'Description' and 'Quantity'
+                for row in table:
+                    # Filter out header rows or empty rows
+                    if row[1] and "Description" not in row[1] and row[4]:
+                        try:
+                            desc = row[1].replace('\n', ' ').strip()
+                            qty = int(float(row[4]))
+                            items_found.append({"name": desc, "qty": qty})
+                        except:
+                            continue
+    return items_found
+
+# --- 3. LOGIN ---
 if "user" not in st.session_state:
     st.title("🛡️ Mekgoro Secure Login")
-    name = st.selectbox("Who is logging in?", ["Ndule", "Tshepo (Driver)", "Biino", "Anthony", "Mike"])
+    name = st.selectbox("Staff Member", ["Ndule", "Tshepo (Driver)", "Biino"])
     if st.button("Access Terminal"):
         st.session_state.user = name
         st.rerun()
     st.stop()
 
-# --- 3. INTERFACE ---
+# --- 4. INTERFACE ---
 st.title(f"🏗️ Mekgoro Terminal | User: {st.session_state.user}")
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Warehouse Ledger", "📥 Purchases & Uploads", "📤 Site Deliveries", "🕒 Activity Logs"])
+tab1, tab2, tab3 = st.tabs(["📊 Warehouse Ledger", "📥 Upload & Auto-Scan", "📤 Site Deliveries"])
 
 with tab1:
     st.subheader("Current Warehouse Stock")
-    search_main = st.text_input("🔍 Search Manual Items...")
-    df_all = pd.read_sql("SELECT item_name as 'Item', qty as 'Stock' FROM assets ORDER BY item_name ASC", db)
-    if search_main:
-        df_all = df_all[df_all['Item'].str.contains(search_main, case=False, na=False)]
-    st.dataframe(df_all, use_container_width=True)
+    data = pd.read_sql("SELECT item_name as 'Item', qty as 'Stock' FROM assets ORDER BY item_name ASC", db)
+    st.dataframe(data, use_container_width=True)
 
 with tab2:
-    st.subheader("📥 Record Purchase (Manual + Invoice)")
-    st.info("Fill this in when buying new stock. You can upload the PDF invoice or a Photo.")
+    st.subheader("📥 Auto-Scan Supplier Invoice")
+    st.write("Upload the Omnisurge PDF to automatically update stock.")
     
-    with st.form("purchase_form", clear_on_submit=True):
-        p_name = st.text_input("Item Name (e.g., 50mm PVC Pipe)")
-        p_qty = st.number_input("Quantity Received", min_value=1, step=1)
-        p_ref = st.text_input("Supplier Name / Invoice #")
+    # PDF Upload
+    uploaded_file = st.file_uploader("Upload PDF Invoice", type=['pdf'])
+    
+    if uploaded_file is not None:
+        # Extract data using our scanner
+        extracted_items = scan_omnisurge_pdf(uploaded_file)
         
-        # FILE UPLOAD (PDF or Image)
-        uploaded_file = st.file_uploader("Upload Invoice (PDF) or Photo of Goods", type=['pdf', 'png', 'jpg', 'jpeg'])
-        
-        if st.form_submit_button("Save to Inventory"):
-            if not p_name:
-                st.error("Please enter the Item Name.")
-            else:
-                file_path = ""
-                if uploaded_file is not None:
-                    file_path = os.path.join("uploads", f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uploaded_file.name}")
-                    with open(file_path, "wb") as f:
-                        f.write(uploaded_file.getbuffer())
+        if not extracted_items:
+            st.error("Could not find items in this PDF. Please enter manually.")
+        else:
+            st.write("### Items Detected:")
+            for item in extracted_items:
+                st.write(f"✅ {item['name']} - **Qty: {item['qty']}**")
+            
+            ref_no = st.text_input("Enter Document Number (e.g. ION127436)")
+            
+            if st.button("Confirm & Update Ledger"):
+                # Save the file first
+                f_path = os.path.join("uploads", f"{datetime.now().strftime('%Y%m%d')}_{uploaded_file.name}")
+                with open(f_path, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
                 
-                # Update Inventory
-                db.execute("INSERT INTO assets (item_name, qty, last_update) VALUES (?, ?, ?) ON CONFLICT(item_name) DO UPDATE SET qty = qty + excluded.qty",
-                           (p_name.strip(), int(p_qty), datetime.now().strftime("%Y-%m-%d %H:%M")))
+                # Process each item found in PDF
+                for item in extracted_items:
+                    db.execute("INSERT INTO assets (item_name, qty) VALUES (?, ?) ON CONFLICT(item_name) DO UPDATE SET qty = qty + excluded.qty",
+                               (item['name'], item['qty']))
+                    db.execute("INSERT INTO logs VALUES ('PURCHASE', ?, ?, ?, ?, ?, ?)", 
+                               (item['name'], item['qty'], ref_no, f_path, st.session_state.user, datetime.now().strftime("%Y-%m-%d %H:%M")))
                 
-                # Save Log with file path
-                db.execute("INSERT INTO logs VALUES ('PURCHASE', ?, ?, ?, ?, ?, ?)", 
-                           (p_name.strip(), int(p_qty), p_ref, file_path, st.session_state.user, datetime.now().strftime("%Y-%m-%d %H:%M")))
                 db.commit()
-                st.success(f"Successfully recorded {p_qty} x {p_name}")
+                st.success("Ledger Updated Successfully!")
                 st.rerun()
 
 with tab3:
-    st.subheader("📤 Record Delivery to Site")
+    st.subheader("📤 Record Site Delivery")
     items_list = pd.read_sql("SELECT item_name, qty FROM assets", db)
-    
-    if items_list.empty:
-        st.warning("No stock available to deliver yet. Record a Purchase first.")
-    else:
+    if not items_list.empty:
         with st.form("delivery_form"):
-            d_choice = st.selectbox("Select Item for Site", items_list['item_name'].tolist())
-            d_bal = items_list[items_list['item_name'] == d_choice]['qty'].values[0]
-            st.write(f"📦 **Currently Available: {int(d_bal)}**")
-            
-            d_qty = st.number_input("Quantity Leaving", min_value=1, step=1)
-            d_site = st.text_input("Project Name / Site Address")
-            
+            choice = st.selectbox("Item", items_list['item_name'].tolist())
+            d_qty = st.number_input("Quantity Out", min_value=1, step=1)
+            site = st.text_input("Project Site")
             if st.form_submit_button("Confirm Dispatch"):
-                if d_qty > d_bal:
-                    st.error("Not enough stock!")
-                else:
-                    db.execute("UPDATE assets SET qty = qty - ? WHERE item_name = ?", (int(d_qty), d_choice))
-                    db.execute("INSERT INTO logs VALUES ('DELIVERY', ?, ?, ?, ?, ?, ?)", 
-                               (d_choice, int(d_qty), d_site, "", st.session_state.user, datetime.now().strftime("%Y-%m-%d %H:%M")))
-                    db.commit()
-                    st.warning(f"Dispatched {d_qty} to {d_site}")
-                    st.rerun()
-
-with tab4:
-    st.subheader("Activity History & Attachments")
-    logs = pd.read_sql("SELECT timestamp, type, item_name, qty, ref_no as 'Ref/Site', file_path, user FROM logs ORDER BY timestamp DESC", db)
-    
-    # Display table with link to files
-    for index, row in logs.iterrows():
-        col1, col2, col3, col4, col5 = st.columns([2, 1, 2, 1, 1])
-        with col1: st.write(row['timestamp'])
-        with col2: st.write(row['type'])
-        with col3: st.write(f"{row['qty']} x {row['item_name']}")
-        with col4: st.write(row['Ref/Site'])
-        with col5:
-            if row['file_path']:
-                # Provide a download button for the invoice/photo
-                with open(row['file_path'], "rb") as f:
-                    st.download_button("View Attachment", f, file_name=os.path.basename(row['file_path']))
-            else:
-                st.write("No File")
-        st.divider()
+                db.execute("UPDATE assets SET qty = qty - ? WHERE item_name = ?", (int(d_qty), choice))
+                db.execute("INSERT INTO logs VALUES ('DELIVERY', ?, ?, ?, ?, ?, ?)", 
+                           (choice, int(d_qty), site, "", st.session_state.user, datetime.now().strftime("%Y-%m-%d %H:%M")))
+                db.commit()
+                st.rerun()
