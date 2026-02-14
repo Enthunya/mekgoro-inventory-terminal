@@ -6,43 +6,41 @@ from datetime import datetime
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
+import re
 
-# --- 1. CONFIGURATION ---
-st.set_page_config(page_title="Mekgoro Terminal", page_icon="🏗️", layout="wide")
+# --- 1. CONFIG ---
+st.set_page_config(page_title="Mekgoro Smart Inventory", page_icon="🏗️", layout="wide")
 
-# --- 2. DATABASE INITIALIZATION ---
+# --- 2. DATABASE ---
 db = sqlite3.connect("mekgoro_database.db", check_same_thread=False)
 
 def init_db():
-    # Create tables if they don't exist
+    # Assets tracks physical stock
     db.execute("""
         CREATE TABLE IF NOT EXISTS assets (
-            item_name TEXT PRIMARY KEY, 
-            qty_on_hand INTEGER, 
+            item_name TEXT PRIMARY KEY,
+            qty_on_hand INTEGER,
             last_update TEXT
         )
     """)
+    # Logs tracks every single movement for Mike & Anthony to audit
     db.execute("""
         CREATE TABLE IF NOT EXISTS logs (
-            type TEXT, 
-            item_name TEXT, 
-            qty INTEGER, 
-            ref_doc TEXT, 
-            user TEXT, 
-            timestamp TEXT, 
-            status TEXT, 
+            type TEXT,
+            item_name TEXT,
+            qty INTEGER,
+            ref_doc TEXT,
+            user TEXT,
+            timestamp TEXT,
+            status TEXT,
             supplier TEXT
         )
     """)
-    # Add a starting row if empty to prevent 'DatabaseError' on select
-    check = db.execute("SELECT count(*) FROM assets").fetchone()[0]
-    if check == 0:
-        db.execute("INSERT INTO assets VALUES ('Example: Cement 50kg', 0, 'Initial Setup')")
     db.commit()
 
 init_db()
 
-# --- 3. GOOGLE DRIVE AUTH (Using Secrets) ---
+# --- 3. GOOGLE DRIVE SETUP (Using Secrets) ---
 SCOPES = ['https://www.googleapis.com/auth/drive.file']
 
 if "gcp_service_account" in st.secrets:
@@ -54,78 +52,72 @@ else:
     st.stop()
 
 def upload_to_drive(file_obj, file_name):
-    """Saves file temporarily then uploads to Google Drive"""
     temp_path = f"temp_{file_name}"
-    with open(temp_path, "wb") as f:
+    with open(temp_path, "wb") as f: 
         f.write(file_obj.getbuffer())
-    
-    # NOTE: You can add 'parents': ['YOUR_FOLDER_ID'] here if you want a specific folder
     file_metadata = {'name': file_name}
     media = MediaFileUpload(temp_path, resumable=True)
     file = drive_service.files().create(body=file_metadata, media_body=media, fields='id, webViewLink').execute()
-    
-    os.remove(temp_path) 
+    os.remove(temp_path)
     return file.get('webViewLink')
 
-# --- 4. APP INTERFACE ---
-st.title("🏗️ Mekgoro Smart Inventory System")
+# --- 4. SECURITY: SANITIZE SUPPLIER DATA ---
+def sanitize_text(text):
+    # Removes emails and phone numbers to protect client privacy
+    text = re.sub(r'\S+@\S+', '[REDACTED]', text)
+    text = re.sub(r'\b\d{7,15}\b', '[REDACTED]', text)
+    return text
 
-tab1, tab2, tab3 = st.tabs(["📥 Add Stock (Inbound)", "📤 Process P.O. (Outbound)", "📋 Warehouse Ledger"])
+# --- 5. LOGIN SYSTEM ---
+if "user_name" not in st.session_state:
+    st.title("🛡️ Mekgoro Secure Login")
+    user = st.selectbox("Who is accessing the terminal?", ["Manager", "Biino", "Anthony", "Mike", "Gunman"])
+    if st.button("Enter Terminal"):
+        st.session_state.user_name = user
+        st.rerun()
+    st.stop()
+
+# --- 6. MAIN TERMINAL INTERFACE ---
+st.title(f"🏗️ Mekgoro Smart Inventory (User: {st.session_state.user_name})")
+tab1, tab2, tab3, tab4 = st.tabs(["📥 Add Stock", "📤 Process P.O.", "📋 Warehouse Ledger", "🏢 Supplier Ledger"])
 
 with tab1:
-    st.subheader("Add Stock to Warehouse")
-    with st.form("inbound_form"):
+    st.subheader("Add Stock (Receipt Upload)")
+    with st.form("inbound"):
         supplier = st.text_input("Supplier Name")
         item = st.text_input("Item Name (e.g., Cement 50kg)")
         qty = st.number_input("Quantity Received", min_value=1)
-        receipt = st.file_uploader("Upload Receipt/Invoice", type=['pdf', 'jpg', 'png'])
-        
-        if st.form_submit_button("Confirm Stock Entry"):
+        receipt = st.file_uploader("Upload Receipt", type=['pdf','jpg','png'])
+        if st.form_submit_button("Confirm Entry"):
             now = datetime.now().strftime("%Y-%m-%d %H:%M")
-            link = upload_to_drive(receipt, receipt.name) if receipt else "No Document"
-            
-            # Logic: Update existing item qty OR insert new
-            db.execute("""
-                INSERT INTO assets (item_name, qty_on_hand, last_update) 
-                VALUES (?,?,?) 
-                ON CONFLICT(item_name) DO UPDATE SET 
-                qty_on_hand = qty_on_hand + excluded.qty_on_hand, 
-                last_update = excluded.last_update
-            """, (item, qty, now))
-            
-            db.execute("INSERT INTO logs VALUES (?,?,?,?,?,?,?,?)", 
-                       ("INCOMING", item, qty, link, "Admin", now, "Verified", supplier))
+            link = upload_to_drive(receipt, receipt.name) if receipt else "No Doc"
+            db.execute("INSERT INTO assets VALUES (?,?,?) ON CONFLICT(item_name) DO UPDATE SET qty_on_hand=qty_on_hand+?, last_update=?", (item, qty, now, qty, now))
+            db.execute("INSERT INTO logs VALUES (?,?,?,?,?,?,?,?)", ("INCOMING", item, qty, link, st.session_state.user_name, now, "Verified", supplier))
             db.commit()
-            st.success(f"✅ Successfully added {qty} {item}. Record stored.")
+            st.success(f"Stock Updated: {qty} {item} added.")
 
 with tab2:
-    st.subheader("Process & Check Client P.O.")
-    # Pull current items for a dropdown
-    item_list = [row[0] for row in db.execute("SELECT item_name FROM assets").fetchall()]
-    
-    with st.form("outbound_form"):
-        po_item = st.selectbox("Select Item in Stock", item_list)
-        po_qty = st.number_input("Quantity Requested on P.O.", min_value=1)
-        
-        if st.form_submit_button("Check Availability"):
-            res = db.execute("SELECT qty_on_hand FROM assets WHERE item_name = ?", (po_item,)).fetchone()
-            current_stock = res[0] if res else 0
-            
-            if current_stock >= po_qty:
-                st.success(f"✅ STOCK AVAILABLE: You have {current_stock} units. You can safely process this P.O.")
-                if st.checkbox("Ship now and subtract from inventory?"):
-                    new_qty = current_stock - po_qty
-                    now = datetime.now().strftime("%Y-%m-%d %H:%M")
-                    db.execute("UPDATE assets SET qty_on_hand = ?, last_update = ? WHERE item_name = ?", (new_qty, now, po_item))
-                    db.commit()
-                    st.info("Stock updated and logged.")
+    st.subheader("Check & Process Client P.O.")
+    items = [r[0] for r in db.execute("SELECT item_name FROM assets").fetchall()]
+    with st.form("outbound"):
+        po_item = st.selectbox("Select Item", items) if items else st.info("Add stock first!")
+        po_qty = st.number_input("Quantity on P.O.", min_value=1)
+        if st.form_submit_button("Verify Stock"):
+            res = db.execute("SELECT qty_on_hand FROM assets WHERE item_name=?", (po_item,)).fetchone()
+            current = res[0] if res else 0
+            if current >= po_qty:
+                st.success(f"✅ AVAILABLE: {current} in stock.")
+                # Logic to subtract stock would go here
             else:
-                st.error(f"🚨 SHORTAGE: You only have {current_stock} units. You need {po_qty - current_stock} more to fulfill this order.")
+                st.error(f"🚨 SHORTAGE: Need {po_qty - current} more.")
 
 with tab3:
-    st.subheader("Current Warehouse Status")
-    # Using the exact aliases the UI expects to prevent DatabaseErrors
-    query = "SELECT item_name AS 'Item Name', qty_on_hand AS 'In Stock', last_update AS 'Last Activity' FROM assets"
-    ledger_df = pd.read_sql(query, db)
-    st.dataframe(ledger_df, use_container_width=True)
+    st.subheader("Live Warehouse Status")
+    df = pd.read_sql("SELECT item_name AS 'Item', qty_on_hand AS 'In Stock', last_update AS 'Last Activity' FROM assets", db)
+    st.dataframe(df, use_container_width=True)
 
+with tab4:
+    st.subheader("Supplier Activity & Re-order Insights")
+    logs = pd.read_sql("SELECT supplier, item_name, qty, timestamp FROM logs WHERE type='INCOMING'", db)
+    st.write("Recent Supplier Deliveries:")
+    st.table(logs)
