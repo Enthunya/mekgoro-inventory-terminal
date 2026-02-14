@@ -6,14 +6,15 @@ import hashlib
 from datetime import datetime
 
 # =========================================================
-# 1. CONFIG & BRANDING
+# 1. BRANDING & STYLE
 # =========================================================
 st.set_page_config(page_title="Mekgoro Inventory", layout="centered")
 
 st.markdown("""
 <style>
     .stButton > button { width: 100%; height: 3.5rem; border-radius: 12px; font-weight: bold; background-color: #1E3A8A; color: white; }
-    .stSelectbox label, .stTextInput label { font-weight: bold; }
+    .stSelectbox label, .stTextInput label { font-weight: bold; font-size: 15px; }
+    .stAlert { border-radius: 10px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -75,55 +76,62 @@ if mode == "📊 Stock":
         st.dataframe(df, use_container_width=True, hide_index=True)
 
 # ---------------------------------------------------------
-# TAB 2: RECEIVE (ENFORCED EXISTING SUPPLIER)
+# TAB 2: RECEIVE (REGULAR STOCK VS NEW STOCK)
 # ---------------------------------------------------------
 elif mode == "📥 Receive":
     st.subheader("New Stock Entry")
     
-    # Get only existing/old suppliers from memory
+    # 1. Choose Supplier (Existing or New)
     existing_suppliers = pd.read_sql("SELECT DISTINCT supplier FROM supplier_memory", db)['supplier'].tolist()
     
-    # Force selection from existing list
-    col_v1, col_v2 = st.columns([2, 1])
+    is_new_vendor = st.checkbox("➕ Add a New Supplier (First time using them)")
     
-    if not existing_suppliers:
-        st.warning("No suppliers in memory yet. Please add your first one below.")
-        is_new = True
+    if is_new_vendor or not existing_suppliers:
+        vendor_name = st.text_input("Type New Supplier Name")
     else:
-        is_new = col_v2.checkbox("New Supplier?")
-        vendor = col_v1.selectbox("Select Existing Supplier", sorted(existing_suppliers), disabled=is_new)
+        vendor_name = st.selectbox("Select Existing Supplier", sorted(existing_suppliers))
     
-    if is_new:
-        vendor_name = st.text_input("Type NEW Supplier Name (e.g., Lock it)")
-    else:
-        vendor_name = vendor
-
     if vendor_name:
-        # Load items specifically for THIS supplier
-        history = pd.read_sql("SELECT item_name FROM supplier_memory WHERE supplier = ?", db, params=(vendor_name,))['item_name'].tolist()
+        # 2. Predictive List: Items we have bought from this specific supplier before
+        history_items = pd.read_sql("SELECT item_name FROM supplier_memory WHERE supplier = ?", db, params=(vendor_name,))['item_name'].tolist()
         
         with st.form("in_form", clear_on_submit=True):
-            st.write(f"Predictive Item List for **{vendor_name}**:")
-            p_name = st.selectbox("Known Items", ["-- Select --"] + sorted(history))
+            st.markdown(f"### Receiving from: **{vendor_name}**")
             
-            manual = st.text_input("OR Add New Item (if not in list above)")
+            # Choice A: Pick from Regular Stock
+            if history_items:
+                p_name = st.selectbox("Option A: Pick from Regular Stock (Items bought before)", ["-- Select --"] + sorted(history_items))
+            else:
+                p_name = "-- Select --"
+                st.info("No items in memory for this supplier yet.")
+            
+            # Choice B: Type New Item
+            manual = st.text_input("Option B: Enter New Stock Item (If not in list above)")
+            
+            # Logic to decide which name to use
             final_name = manual.strip() if manual else p_name
             
+            st.divider()
             c1, c2 = st.columns(2)
-            qty = c1.number_input("Quantity", min_value=1, step=1)
+            qty = c1.number_input("Quantity Received", min_value=1, step=1)
             ref = c2.text_input("Invoice / Ref #")
             
             if st.form_submit_button("Confirm & Update Warehouse"):
-                if final_name and final_name != "-- Select --":
+                if not final_name or final_name == "-- Select --":
+                    st.error("Please select an existing item or type a new one.")
+                else:
+                    # Update Stock Count
                     db.execute("INSERT INTO assets (item_name, qty) VALUES (?, ?) ON CONFLICT(item_name) DO UPDATE SET qty = qty + excluded.qty", (final_name, int(qty)))
+                    # Link Supplier and Item for next time
                     db.execute("INSERT OR IGNORE INTO supplier_memory VALUES (?, ?)", (vendor_name, final_name))
+                    # Record the Log
                     db.execute("INSERT INTO logs VALUES ('IN', ?, ?, ?, ?, ?, ?)", (final_name, int(qty), ref, st.session_state.user, datetime.now().strftime("%Y-%m-%d %H:%M"), vendor_name))
                     db.commit()
-                    st.success(f"Stock Updated: {final_name}")
+                    st.success(f"Stock Updated! Added {qty} units of {final_name}")
                     st.rerun()
 
 # ---------------------------------------------------------
-# TAB 3 & 4: DISPATCH & HISTORY (STAY THE SAME)
+# TABS 3 & 4: DISPATCH & HISTORY (STAY THE SAME)
 # ---------------------------------------------------------
 elif mode == "📤 Dispatch":
     st.subheader("Dispatch to Site")
@@ -141,6 +149,7 @@ elif mode == "📤 Dispatch":
                 db.execute("UPDATE assets SET qty = qty - ? WHERE item_name = ?", (int(d_qty), choice))
                 db.execute("INSERT INTO logs VALUES ('OUT', ?, ?, ?, ?, ?, 'INTERNAL')", (choice, int(d_qty), site, st.session_state.user, datetime.now().strftime("%Y-%m-%d %H:%M")))
                 db.commit()
+                st.success(f"Successfully dispatched to {site}")
                 st.rerun()
 
 elif mode == "🕒 History":
