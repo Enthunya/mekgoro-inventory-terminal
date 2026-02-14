@@ -1,117 +1,95 @@
 import streamlit as st
-import sqlite3
 import pandas as pd
-import urllib.parse
-from datetime import datetime
+import sqlite3
 import os
+from datetime import datetime
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
 
 # --- 1. CONFIGURATION ---
 st.set_page_config(page_title="Mekgoro Terminal", page_icon="🏗️", layout="wide")
 
-# Custom CSS for Mekgoro Branding (matching your logo's green)
-st.markdown("""
-<style>
-    .stButton>button {background-color: #2D5A27; color:white; border-radius:8px; width:100%;}
-    [data-testid="stSidebar"] {background-color: #f1f3f1;}
-    .stTabs [data-baseweb="tab-list"] {gap: 20px;}
-    .stMetric {background-color: #ffffff; padding: 15px; border-radius: 10px; border: 1px solid #e6e9ef;}
-</style>
-""", unsafe_allow_html=True)
-
-# --- 2. DATABASE & TEAM DATA ---
+# --- 2. DATABASE ---
 db = sqlite3.connect("mekgoro_database.db", check_same_thread=False)
 
 def init_db():
-    db.execute("CREATE TABLE IF NOT EXISTS assets (asset_id TEXT PRIMARY KEY, description TEXT, qty INTEGER, last_updated TEXT)")
-    db.execute("CREATE TABLE IF NOT EXISTS history (item_desc TEXT, qty_added INTEGER, date TEXT, supplier TEXT, unit_price REAL, updated_by TEXT)")
-    db.execute("CREATE TABLE IF NOT EXISTS client_orders (client_name TEXT, item_desc TEXT, qty_ordered INTEGER, qty_remaining INTEGER, po_date TEXT, status TEXT)")
-    db.execute("CREATE TABLE IF NOT EXISTS audit_logs (username TEXT, action TEXT, timestamp TEXT)")
+    # Assets tracks physical stock; Logs tracks every movement
+    db.execute("CREATE TABLE IF NOT EXISTS assets (item_name TEXT PRIMARY KEY, qty_on_hand INTEGER, last_update TEXT)")
+    db.execute("CREATE TABLE IF NOT EXISTS logs (type TEXT, item_name TEXT, qty INTEGER, ref_doc TEXT, user TEXT, timestamp TEXT, status TEXT, supplier TEXT)")
     db.commit()
 
 init_db()
 
-TEAM_CONFIG = {"Manager (You)": "1111", "Biino (Accountant)": "2222", "Gunman (Driver/Inv)": "3333", "Anthony (Director)": "4444", "Mike (Director)": "5555"}
-TEAM_PHONES = {"You": "27719620352", "Biino": "27690403000", "Gunman": "27695311451", "Anthony": "27828350250", "Mike": "27722978978"}
+# --- 3. GOOGLE DRIVE AUTH (Using Secrets) ---
+SCOPES = ['https://www.googleapis.com/auth/drive.file']
 
-# --- 3. LOGIN SYSTEM ---
-if "user_name" not in st.session_state:
-    col1, col2, col3 = st.columns([1, 1.5, 1])
-    with col2:
-        if os.path.exists("logo.png"): st.image("logo.png", use_container_width=True)
-        st.subheader("🛡️ Mekgoro Smart Inventory")
-        user_sel = st.selectbox("Select User", list(TEAM_CONFIG.keys()))
-        pin_in = st.text_input("Enter PIN", type="password")
-        if st.button("Unlock Terminal"):
-            if pin_in == TEAM_CONFIG[user_sel]:
-                st.session_state.user_name, st.session_state.role = user_sel, ("admin" if "Manager" in user_sel else "viewer")
-                db.execute("INSERT INTO audit_logs VALUES (?,?,?)", (user_sel, "Login", datetime.now().strftime("%Y-%m-%d %H:%M")))
-                db.commit()
-                st.rerun()
-            else: st.error("Invalid PIN")
+if "gcp_service_account" in st.secrets:
+    info = dict(st.secrets["gcp_service_account"])
+    credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+    drive_service = build('drive', 'v3', credentials=credentials)
+else:
+    st.error("⚠️ Google Secrets not found in Streamlit Settings!")
     st.stop()
 
-# --- 4. NAVIGATION ---
-if os.path.exists("logo.png"): st.sidebar.image("logo.png")
-st.sidebar.write(f"👤 **{st.session_state.user_name}**")
-if st.sidebar.button("Log Out"): st.session_state.clear(); st.rerun()
+def upload_to_drive(file_obj, file_name):
+    """Saves file temporarily then uploads to Google Drive"""
+    temp_path = f"temp_{file_name}"
+    with open(temp_path, "wb") as f:
+        f.write(file_obj.getbuffer())
+    
+    file_metadata = {'name': file_name}
+    media = MediaFileUpload(temp_path, resumable=True)
+    file = drive_service.files().create(body=file_metadata, media_body=media, fields='id, webViewLink').execute()
+    
+    os.remove(temp_path) # Clean up
+    return file.get('webViewLink')
 
-tab1, tab2, tab3, tab4 = st.tabs(["🏗️ Inventory", "🚚 Deliveries", "📈 Insights", "🕵️ Audit"])
+# --- 4. THE SMART WORKFLOW ---
+st.title("🏗️ Mekgoro Smart Inventory System")
 
-# --- 5. TAB 1: INVENTORY & P.O. ENTRY ---
+tab1, tab2, tab3 = st.tabs(["📥 Add Stock (Receipts)", "📤 Process P.O. (Client Orders)", "📋 Warehouse Ledger"])
+
 with tab1:
-    col_l, col_r = st.columns([2, 1])
-    with col_l:
-        st.subheader("Live Stock Ledger")
-        df_assets = pd.read_sql("SELECT * FROM assets", db)
-        search = st.text_input("🔍 Search Items...")
-        if not df_assets.empty:
-            if search: df_assets = df_assets[df_assets['description'].str.contains(search, case=False)]
-            st.dataframe(df_assets, use_container_width=True, hide_index=True)
-        else: st.info("No items in inventory.")
+    st.subheader("Add Stock to Warehouse")
+    with st.form("inbound"):
+        supplier = st.text_input("Supplier Name")
+        item = st.text_input("Item Name (e.g., Cement 50kg)")
+        qty = st.number_input("Quantity Received", min_value=1)
+        receipt = st.file_uploader("Upload Receipt/Invoice", type=['pdf', 'jpg', 'png'])
+        
+        if st.form_submit_button("Confirm Stock Entry"):
+            now = datetime.now().strftime("%Y-%m-%d %H:%M")
+            link = upload_to_drive(receipt, receipt.name) if receipt else "Manual"
+            
+            db.execute("INSERT INTO assets (item_name, qty_on_hand, last_update) VALUES (?,?,?) ON CONFLICT(item_name) DO UPDATE SET qty_on_hand = qty_on_hand + ?, last_update = ?", (item, qty, now, qty, now))
+            db.execute("INSERT INTO logs VALUES (?,?,?,?,?,?,?,?)", ("INCOMING", item, qty, link, "User", now, "Added", supplier))
+            db.commit()
+            st.success(f"✅ Added {qty} {item} to stock. Document saved to Drive.")
 
-    with col_r:
-        if st.session_state.role == "admin":
-            with st.expander("➕ Update Stock / Log P.O.", expanded=True):
-                with st.form("entry_form", clear_on_submit=True):
-                    a_id, desc = st.text_input("ID / Barcode"), st.text_input("Description")
-                    qty = st.number_input("Quantity", step=1)
-                    supp, price = st.text_input("Supplier"), st.number_input("Unit Price (R)", step=0.01)
-                    is_po = st.checkbox("Mark as Client Order (P.O.)")
-                    if st.form_submit_button("Save"):
-                        now = datetime.now().strftime("%Y-%m-%d %H:%M")
-                        if is_po: db.execute("INSERT INTO client_orders VALUES (?,?,?,?,?,?)", ("Client", desc, qty, qty, now, "Pending"))
-                        else:
-                            db.execute("INSERT INTO assets VALUES (?,?,?,?) ON CONFLICT(asset_id) DO UPDATE SET qty=qty+excluded.qty, last_updated=excluded.last_updated", (a_id, desc, qty, now))
-                            db.execute("INSERT INTO history VALUES (?,?,?,?,?,?)", (desc, qty, now, supp, price, st.session_state.user_name))
-                        db.commit(); st.success("Updated Successfully"); st.rerun()
-
-# --- 6. TAB 2: DELIVERY TRACKER ---
 with tab2:
-    st.subheader("Active Deliveries")
-    orders = pd.read_sql("SELECT rowid as ID, * FROM client_orders WHERE status != 'Complete'", db)
-    if not orders.empty:
-        st.dataframe(orders, use_container_width=True, hide_index=True)
-        with st.expander("Log Delivery (Partial or Full)"):
-            sel_id = st.number_input("Order ID", min_value=1)
-            del_qty = st.number_input("Qty Delivered", min_value=1)
-            if st.button("Confirm Delivery"):
-                db.execute("UPDATE client_orders SET qty_remaining = qty_remaining - ?, status = CASE WHEN qty_remaining <= ? THEN 'Complete' ELSE 'Partial' END WHERE rowid = ?", (del_qty, del_qty, sel_id))
-                db.commit(); st.success("Delivery Tracked"); st.rerun()
-    else: st.info("No pending client orders.")
+    st.subheader("Process & Check Client P.O.")
+    with st.form("outbound"):
+        po_item = st.text_input("Item requested")
+        po_qty = st.number_input("Quantity requested", min_value=1)
+        po_file = st.file_uploader("Upload Client P.O.", type=['pdf'])
+        
+        if st.form_submit_button("Verify Stock Availability"):
+            res = db.execute("SELECT qty_on_hand FROM assets WHERE item_name = ?", (po_item,)).fetchone()
+            current = res[0] if res else 0
+            
+            if current >= po_qty:
+                st.success(f"✅ AVAILABLE: You have {current} in stock. Ready to ship.")
+                if st.checkbox("Confirm Shipment (Subtract Stock)"):
+                    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+                    db.execute("UPDATE assets SET qty_on_hand = qty_on_hand - ? WHERE item_name = ?", (po_qty, po_item))
+                    db.commit()
+                    st.info("Stock updated. Order processed.")
+            else:
+                shortage = po_qty - current
+                st.error(f"🚨 INSUFFICIENT STOCK: You only have {current}. You need to buy {shortage} more {po_item}.")
 
-# --- 7. TAB 3: PROCUREMENT INSIGHTS ---
 with tab3:
-    st.subheader("📊 Business Intelligence")
-    hist_df = pd.read_sql("SELECT item_desc, SUM(qty_added) as Total, AVG(unit_price) as AvgPrice FROM history GROUP BY item_desc ORDER BY Total DESC", db)
-    if not hist_df.empty:
-        st.write("### High Turnover (Petrol Savers)")
-        st.bar_chart(hist_df.set_index('item_desc')['Total'])
-        st.write("### Purchase Pricing History")
-        st.table(hist_df)
-    else: st.info("Procurement data will appear here once purchases are logged.")
-
-# --- 8. TAB 4: AUDIT LOGS ---
-with tab4:
-    st.subheader("🕵️ System Activity")
-    logs = pd.read_sql("SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT 20", db)
-    st.table(logs)
+    st.subheader("Warehouse Status")
+    ledger = pd.read_sql("SELECT item_name as 'Item', qty_on_hand as 'In Stock', last_update as 'Last Activity' FROM assets", db)
+    st.dataframe(ledger, use_container_width=True)
