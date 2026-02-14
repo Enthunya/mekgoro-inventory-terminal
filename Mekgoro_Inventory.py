@@ -2,12 +2,11 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import os
-import io
 from datetime import datetime
 
 # --- 1. CONFIG & DATABASE ---
 st.set_page_config(page_title="Mekgoro Inventory", layout="wide")
-# Moving to v10 for safety checks and better loading
+# Moving to v10 to ensure a clean slate
 db = sqlite3.connect("mekgoro_v10.db", check_same_thread=False)
 
 def init_db():
@@ -15,31 +14,25 @@ def init_db():
     db.execute("CREATE TABLE IF NOT EXISTS logs (type TEXT, item_name TEXT, qty INTEGER, ref_no TEXT, user TEXT, timestamp TEXT)")
     db.commit()
 
-    # AUTO-LOAD LOGIC
+    # AUTO-LOAD FROM FILE
     cursor = db.cursor()
     cursor.execute("SELECT COUNT(*) FROM assets")
     if cursor.fetchone()[0] == 0:
-        # Check for both possible extensions
-        files_to_check = ["ItemListingReport.xlsx", "ItemListingReport.csv"]
-        for f in files_to_check:
+        # Check for your specific file names
+        for f in ["ItemListingReport.csv", "ItemListingReport.xlsx"]:
             if os.path.exists(f):
                 try:
-                    if f.endswith('.xlsx'):
-                        df = pd.read_excel(f)
-                    else:
-                        df = pd.read_csv(f, skiprows=1)
-                    
-                    # Ensure we have the right columns
-                    if 'Description' in df.columns and 'Qty on Hand' in df.columns:
-                        for _, row in df.iterrows():
-                            name = str(row['Description'])
-                            # Round to whole number
-                            initial_qty = int(float(row['Qty on Hand']))
-                            db.execute("INSERT OR IGNORE INTO assets VALUES (?, ?, ?)",
-                                       (name, initial_qty, datetime.now().strftime("%Y-%m-%d %H:%M")))
-                        db.commit()
-                        break
-                except Exception as e:
+                    df = pd.read_excel(f) if f.endswith('.xlsx') else pd.read_csv(f, skiprows=1)
+                    # Use exact column names from your Sage file
+                    for _, row in df.iterrows():
+                        name = str(row['Description'])
+                        # Force absolute whole number
+                        initial_qty = int(abs(float(row['Qty on Hand'])))
+                        db.execute("INSERT OR IGNORE INTO assets VALUES (?, ?, ?)",
+                                   (name, initial_qty, datetime.now().strftime("%Y-%m-%d %H:%M")))
+                    db.commit()
+                    break
+                except:
                     continue
 
 init_db()
@@ -58,75 +51,63 @@ st.title(f"🏗️ Mekgoro Terminal | User: {st.session_state.user}")
 tab1, tab2, tab3, tab4 = st.tabs(["📊 Total Available", "📥 Purchases", "📤 Deliveries", "🕒 History"])
 
 with tab1:
-    st.subheader("Current Warehouse Stock Levels")
+    st.subheader("Warehouse Inventory")
+    # Diagnostic check
+    item_check = pd.read_sql("SELECT COUNT(*) as count FROM assets", db)['count'][0]
+    if item_check == 0:
+        st.error("🚨 System is empty! Ensure 'ItemListingReport.csv' is uploaded to GitHub.")
     
-    # DIAGNOSTIC TOOL: Only shows if the database is empty
-    items_count = pd.read_sql("SELECT COUNT(*) as count FROM assets", db)['count'][0]
-    if items_count == 0:
-        st.error("🚨 NO ITEMS LOADED. The app cannot find 'ItemListingReport.xlsx' or '.csv' in your GitHub folder.")
-        st.info("Please make sure the file name is EXACTLY 'ItemListingReport.xlsx' (case sensitive) and it is in the same folder as this code.")
-        if st.checkbox("Show files in current folder"):
-            st.write(os.listdir("."))
-
-    search = st.text_input("🔍 Search for an item...", "")
-    data = pd.read_sql("SELECT item_name as 'Item Description', CAST(qty AS INT) as 'Total Available' FROM assets ORDER BY item_name ASC", db)
+    search = st.text_input("🔍 Search Inventory", "")
+    data = pd.read_sql("SELECT item_name as 'Item', qty as 'Total Available' FROM assets ORDER BY item_name ASC", db)
     if search:
-        data = data[data['Item Description'].str.contains(search, case=False, na=False)]
-    st.dataframe(data, use_container_width=True, height=500)
+        data = data[data['Item'].str.contains(search, case=False, na=False)]
+    st.dataframe(data, use_container_width=True, height=400)
 
 with tab2:
     st.subheader("📥 Record New Purchases")
-    all_items = pd.read_sql("SELECT item_name FROM assets ORDER BY item_name ASC", db)['item_name'].tolist()
-    
-    if not all_items:
-        st.warning("Cannot add stock: No items found in the system.")
+    items = pd.read_sql("SELECT item_name FROM assets ORDER BY item_name ASC", db)['item_name'].tolist()
+    if not items:
+        st.warning("No items available to select.")
     else:
-        with st.form("purchase_form"):
-            choice = st.selectbox("Select Item Bought", all_items)
-            raw_qty = st.number_input("Quantity Received (Whole Number)", min_value=1, step=1, value=1)
+        with st.form("in_form"):
+            choice = st.selectbox("Item Description", items)
+            qty_in = st.number_input("Quantity Received", min_value=1, step=1)
             ref = st.text_input("Supplier Invoice #")
-            submit = st.form_submit_button("Add to Inventory")
-            if submit:
-                qty_int = int(raw_qty)
-                db.execute("UPDATE assets SET qty = qty + ? WHERE item_name = ?", (qty_int, choice))
+            if st.form_submit_button("Add to Stock"):
+                db.execute("UPDATE assets SET qty = qty + ? WHERE item_name = ?", (qty_int := int(qty_in), choice))
                 db.execute("INSERT INTO logs VALUES ('PURCHASE', ?, ?, ?, ?, ?)", 
                            (choice, qty_int, ref, st.session_state.user, datetime.now().strftime("%Y-%m-%d %H:%M")))
                 db.commit()
-                st.success(f"Added {qty_int} units.")
+                st.success("Updated!")
                 st.rerun()
 
 with tab3:
     st.subheader("📤 Record Site Deliveries")
     items_df = pd.read_sql("SELECT item_name, qty FROM assets ORDER BY item_name ASC", db)
-    
     if items_df.empty:
-        st.warning("Cannot record delivery: No items found in the system.")
+        st.warning("No items available to deliver.")
     else:
-        with st.form("delivery_form"):
-            choice = st.selectbox("Select Item to Deliver", items_df['item_name'].tolist())
+        with st.form("out_form"):
+            choice = st.selectbox("Select Item", items_df['item_name'].tolist())
+            # Safety check to avoid IndexError
+            current_row = items_df[items_df['item_name'] == choice]
+            current_bal = int(current_row['qty'].values[0]) if not current_row.empty else 0
             
-            # SAFE LOOKUP: Check if choice exists before getting index 0
-            selected_row = items_df[items_df['item_name'] == choice]
-            current_bal = int(selected_row['qty'].values[0]) if not selected_row.empty else 0
-            
-            st.write(f"📦 **Current Balance in Warehouse: {current_bal}**")
-            raw_out = st.number_input("Quantity to Dispatch (Whole Number)", min_value=1, step=1, value=1)
-            project = st.text_input("Project Name / Site Address")
-            submit = st.form_submit_button("Confirm Dispatch")
-            
-            if submit:
-                out_int = int(raw_out)
-                if out_int > current_bal:
-                    st.error(f"❌ Error: Only {current_bal} available.")
+            st.write(f"📦 **Total Available: {current_bal}**")
+            qty_out = st.number_input("Quantity to Dispatch", min_value=1, step=1)
+            project = st.text_input("Project / Site Name")
+            if st.form_submit_button("Confirm Dispatch"):
+                if (out_int := int(qty_out)) > current_bal:
+                    st.error(f"Insufficient stock! Only {current_bal} available.")
                 else:
                     db.execute("UPDATE assets SET qty = qty - ? WHERE item_name = ?", (out_int, choice))
                     db.execute("INSERT INTO logs VALUES ('DELIVERY', ?, ?, ?, ?, ?)", 
                                (choice, out_int, project, st.session_state.user, datetime.now().strftime("%Y-%m-%d %H:%M")))
                     db.commit()
-                    st.warning(f"Dispatched {out_int} units.")
+                    st.warning("Dispatched!")
                     st.rerun()
 
 with tab4:
-    st.subheader("Recent Activity History")
-    logs = pd.read_sql("SELECT timestamp as 'Date/Time', type as 'Action', item_name as 'Item', CAST(qty AS INT) as 'Quantity', ref_no as 'Ref/Project', user as 'Staff' FROM logs ORDER BY timestamp DESC", db)
+    st.subheader("Activity History")
+    logs = pd.read_sql("SELECT timestamp, type as 'Action', item_name, qty as 'Quantity', ref_no as 'Project/Ref', user FROM logs ORDER BY timestamp DESC", db)
     st.dataframe(logs, use_container_width=True)
