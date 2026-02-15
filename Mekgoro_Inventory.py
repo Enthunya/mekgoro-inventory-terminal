@@ -12,9 +12,9 @@ st.markdown("""
     <style>
     .stApp { background-color: #f8f9fa; }
     h1, h2, h3 { color: #006400; }
-    .success-msg { background-color: #e8f5e9; padding: 14px; border-radius: 8px; margin: 12px 0; font-size: 16px; }
-    .warning-msg { background-color: #fff3cd; padding: 14px; border-radius: 8px; margin: 12px 0; font-size: 16px; }
-    .error-msg  { background-color: #ffebee;  padding: 14px; border-radius: 8px; margin: 12px 0; font-size: 16px; }
+    .success-msg { background-color: #e8f5e9; padding: 14px; border-radius: 8px; margin: 12px 0; }
+    .warning-msg { background-color: #fff3cd; padding: 14px; border-radius: 8px; margin: 12px 0; }
+    .error-msg  { background-color: #ffebee;  padding: 14px; border-radius: 8px; margin: 12px 0; }
     .stock-big  { font-size: 42px; font-weight: bold; color: #006400; text-align: center; margin: 20px 0; }
     .metric-label { font-size: 18px; color: #555; text-align: center; }
     </style>
@@ -82,7 +82,7 @@ def get_known_items():
 # ────────────────────────────────────────────────
 if "user" not in st.session_state:
     st.title("Mekgoro Inventory – Login")
-    user = st.selectbox("Select your name", ["Ndule", "Biino", "Anthony", "Mike"])
+    user = st.selectbox("Select your name", ["Ndule", "Biino", "Anthony", "Mike"], key="login_user")
     if st.button("Login", type="primary"):
         st.session_state.user = user
         st.rerun()
@@ -106,34 +106,34 @@ tab_stock, tab_in, tab_out, tab_history = st.tabs([
 # TAB: STOCK OVERVIEW
 # ────────────────────────────────────────────────
 with tab_stock:
-    st.subheader("Current Stock")
+    st.subheader("Current Stock Levels")
     
     df = pd.read_sql("SELECT item_name, quantity, last_update FROM stock ORDER BY item_name", db)
     
     if df.empty:
         st.info("No items in stock yet. Start by receiving goods.")
     else:
-        def color_code(val):
+        def color_qty(val):
             if val <= 0: return 'color: red; font-weight: bold;'
             if val <= 10: return 'color: #d97706; font-weight: bold;'
             return ''
         
-        styled = df.style.format({"quantity": "{:,}"}).map(color_code, subset=["quantity"])
+        styled = df.style.format({"quantity": "{:,}"}).map(color_qty, subset=["quantity"])
         st.dataframe(styled, use_container_width=True, hide_index=True)
 
 # ────────────────────────────────────────────────
-# TAB: RECEIVE
+# TAB: RECEIVE GOODS
 # ────────────────────────────────────────────────
 with tab_in:
-    st.subheader("Receive Goods (In)")
+    st.subheader("Receive Goods (Coming In)")
     
-    supplier = st.text_input("Supplier", placeholder="e.g. Omnisurge (PTY) LTD")
-    ref = st.text_input("Invoice / SO / Delivery Ref", placeholder="e.g. ION127436")
+    supplier = st.text_input("Supplier", placeholder="e.g. Omnisurge", key="receive_supplier")
+    ref = st.text_input("Invoice / SO / Delivery Ref", placeholder="e.g. ION127436", key="receive_ref")
     
     known_items = get_known_items()
-    item = st.text_input("Item", placeholder="e.g. Nitrile Examination Gloves - Large Blue")
+    item = st.text_input("Item Description", placeholder="e.g. Nitrile Examination Gloves - Large Blue", key="receive_item")
     
-    qty = st.number_input("Quantity Received", min_value=0, step=1)
+    qty = st.number_input("Quantity Received", min_value=0, step=1, key="receive_qty")
     
     if st.button("Confirm Receive", type="primary"):
         item = item.strip()
@@ -145,8 +145,8 @@ with tab_in:
             update_stock(item, qty, "receive", ref, supplier)
             st.markdown(f"""
                 <div class="success-msg">
-                <b>Received successfully!</b><br>
-                {qty:,} × <b>{item}</b> from {supplier or 'Unknown'}<br>
+                <b>Success!</b><br>
+                Received {qty:,} × <b>{item}</b> from {supplier or 'Unknown'}<br>
                 Ref: {ref or 'None'}
                 </div>
             """, unsafe_allow_html=True)
@@ -159,18 +159,18 @@ with tab_out:
     st.subheader("Goods Out (Delivery / Sale)")
     
     known_items = get_known_items()
-    item = st.text_input("Item", placeholder="e.g. Nitrile Examination Gloves - Large Blue")
+    item = st.text_input("Item Description", placeholder="e.g. Nitrile Examination Gloves - Large Blue", key="out_item")
     
     current = get_current_stock(item) if item.strip() else 0
-    st.markdown(f'<div class="metric-box">{current:,}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="stock-big">{current:,}</div>', unsafe_allow_html=True)
     st.markdown('<div class="metric-label">Current Stock</div>', unsafe_allow_html=True)
     
-    qty_out = st.number_input("Quantity Leaving", min_value=0, step=1)
+    qty_out = st.number_input("Quantity Leaving", min_value=0, step=1, key="out_qty")
     
-    client = st.text_input("Client / Site", placeholder="e.g. Client XYZ - Johannesburg")
-    client_ref = st.text_input("Client PO / Order Ref", placeholder="e.g. PO-2026-045")
+    client = st.text_input("Client / Site", placeholder="e.g. Client XYZ - Johannesburg", key="out_client")
+    client_ref = st.text_input("Client PO / Order Ref", placeholder="e.g. PO-2026-045", key="out_ref")
     
-    if st.button("Confirm Out", type="primary"):
+    if st.button("Confirm Goods Out", type="primary"):
         item = item.strip()
         if not item:
             st.markdown('<div class="warning-msg">Please enter item description</div>', unsafe_allow_html=True)
@@ -178,7 +178,7 @@ with tab_out:
             st.markdown('<div class="warning-msg">Quantity must be greater than 0</div>', unsafe_allow_html=True)
         elif current < qty_out:
             st.markdown(f"""
-                <div class="danger-msg">
+                <div class="error-msg">
                 <b>Not enough stock!</b><br>
                 Only {current:,} available – cannot release {qty_out:,}
                 </div>
@@ -187,8 +187,8 @@ with tab_out:
             update_stock(item, -qty_out, "out", client_ref, client)
             st.markdown(f"""
                 <div class="success-msg">
-                <b>Goods out recorded!</b><br>
-                {qty_out:,} × <b>{item}</b> to {client or 'Unknown'}<br>
+                <b>Success!</b><br>
+                Released {qty_out:,} × <b>{item}</b> to {client or 'Unknown'}<br>
                 Ref: {client_ref or 'None'}
                 </div>
             """, unsafe_allow_html=True)
@@ -208,7 +208,7 @@ with tab_history:
     """, db)
     
     if logs.empty:
-        st.info("No movements yet.")
+        st.info("No movements recorded yet.")
     else:
         logs['type'] = logs['type'].replace({'receive': 'IN', 'out': 'OUT'})
         logs['quantity'] = logs['quantity'].apply(lambda x: f"+{x:,}" if x > 0 else f"{x:,}")
@@ -220,11 +220,11 @@ with tab_history:
 # ────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("### MEKGORO CONSULTING")
-    st.write(f"**User:** {st.session_state.user}")
+    st.write(f"**Logged in as:** {st.session_state.user}")
     if st.button("Logout"):
         for key in list(st.session_state.keys()):
             del st.session_state[key]
         st.rerun()
     st.markdown("---")
-    st.caption("Simple In / Out Tracking")
+    st.caption("Simple Inventory – Receive & Release")
     st.caption(datetime.now().strftime("%Y-%m-%d %H:%M"))
