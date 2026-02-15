@@ -4,49 +4,50 @@ import sqlite3
 from datetime import datetime
 
 # ────────────────────────────────────────────────
-# PAGE CONFIG – Mobile friendly
+# PAGE CONFIG – Optimized for phones/tablets
 # ────────────────────────────────────────────────
 st.set_page_config(
     page_title="Mekgoro Inventory",
     page_icon="logo.png",
     layout="wide",
-    initial_sidebar_state="collapsed"  # collapsed on mobile
+    initial_sidebar_state="collapsed"  # Collapsed by default on mobile
 )
 
-# Mobile optimizations: larger fonts, better spacing
+# Responsive styling
 st.markdown("""
     <style>
+    .stApp { background-color: #f8f9fa; padding: 10px; }
+    h1, h2, h3 { color: #006400; }
+    .logo-header { text-align: center; margin: 16px 0; }
+    .success-msg { background-color: #e8f5e9; padding: 16px; border-radius: 8px; margin: 16px 0; font-size: 16px; }
+    .warning-msg { background-color: #fff3cd; padding: 16px; border-radius: 8px; margin: 16px 0; font-size: 16px; }
+    .error-msg  { background-color: #ffebee;  padding: 16px; border-radius: 8px; margin: 16px 0; font-size: 16px; }
+    .stock-big  { font-size: 36px; font-weight: bold; color: #006400; text-align: center; margin: 20px 0; }
+    .metric-label { font-size: 16px; color: #555; text-align: center; }
+    
+    /* Mobile/tablet improvements */
     @media (max-width: 768px) {
-        .stApp { padding: 8px; }
-        h1 { font-size: 1.8rem !important; }
-        h2, h3 { font-size: 1.4rem !important; }
+        .logo-header img { width: 180px !important; }
+        h1 { font-size: 1.6rem !important; }
         .stButton > button { 
             width: 100%; 
-            height: 50px; 
+            height: 52px; 
             font-size: 18px; 
-            margin: 8px 0;
+            margin: 10px 0;
         }
         .stTextInput > div > div > input,
         .stNumberInput > div > div > input {
             font-size: 18px;
             padding: 12px;
         }
-        .stock-big { font-size: 36px !important; }
-        .metric-label { font-size: 16px !important; }
         .stTabs [data-baseweb="tab-list"] {
-            flex-wrap: wrap !important;
-            gap: 8px !important;
+            gap: 8px;
         }
         .stTabs [data-baseweb="tab"] {
-            font-size: 16px !important;
-            padding: 10px 16px !important;
+            font-size: 14px;
+            padding: 10px 12px;
         }
     }
-    .success-msg { background-color: #e8f5e9; padding: 16px; border-radius: 8px; margin: 16px 0; font-size: 16px; }
-    .warning-msg { background-color: #fff3cd; padding: 16px; border-radius: 8px; margin: 16px 0; font-size: 16px; }
-    .error-msg  { background-color: #ffebee;  padding: 16px; border-radius: 8px; margin: 16px 0; font-size: 16px; }
-    .stock-big  { font-size: 48px; font-weight: bold; color: #006400; text-align: center; margin: 24px 0; }
-    .metric-label { font-size: 18px; color: #555; text-align: center; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -108,15 +109,17 @@ def get_known_items():
     return df['item_name'].tolist() if not df.empty else []
 
 # ────────────────────────────────────────────────
-# LOGIN – with logo
+# LOGIN SCREEN WITH LOGO
 # ────────────────────────────────────────────────
 if "user" not in st.session_state:
-    st.image("logo.png", width=300, use_column_width=True)
+    st.markdown('<div class="logo-header">', unsafe_allow_html=True)
+    st.image("logo.png", width=240, use_column_width=False)
+    st.markdown("</div>", unsafe_allow_html=True)
     st.markdown("<h3 style='text-align: center; color: #006400;'>MEKGORO CONSULTING</h3>", unsafe_allow_html=True)
     st.title("Inventory Login")
     
     users = sorted(["Anthony", "Biino", "Mike", "Ndule", "Tshepo"])
-    user = st.selectbox("Select your name", users, key="login_user_select")
+    user = st.selectbox("Select your name", users, key="login_user")
     
     if st.button("Login", type="primary", use_container_width=True):
         st.session_state.user = user
@@ -124,9 +127,11 @@ if "user" not in st.session_state:
     st.stop()
 
 # ────────────────────────────────────────────────
-# MAIN PAGE – logo on top
+# MAIN PAGE WITH SMALLER LOGO
 # ────────────────────────────────────────────────
-st.image("logo.png", width=300, use_column_width=True)
+st.markdown('<div class="logo-header">', unsafe_allow_html=True)
+st.image("logo.png", width=240, use_column_width=False)
+st.markdown("</div>", unsafe_allow_html=True)
 st.markdown("<h3 style='text-align: center; color: #006400;'>MEKGORO CONSULTING</h3>", unsafe_allow_html=True)
 st.title(f"Inventory – {st.session_state.user}")
 
@@ -141,12 +146,12 @@ tab_stock, tab_in, tab_out, tab_history = st.tabs([
 # TAB: STOCK OVERVIEW
 # ────────────────────────────────────────────────
 with tab_stock:
-    st.subheader("Current Stock")
+    st.subheader("Current Stock Levels")
     
     df = pd.read_sql("SELECT item_name, quantity, last_update FROM stock ORDER BY item_name", db)
     
     if df.empty:
-        st.info("No items in stock yet. Start receiving goods.")
+        st.info("No items in stock yet. Start by receiving goods.")
     else:
         def color_qty(val):
             if val <= 0: return 'color: red; font-weight: bold;'
@@ -165,7 +170,8 @@ with tab_in:
     supplier = st.text_input("Supplier", placeholder="e.g. Omnisurge", key="rec_supplier")
     ref = st.text_input("Invoice / Ref", placeholder="e.g. ION127436", key="rec_ref")
     
-    item = st.text_input("Item", placeholder="e.g. Nitrile Gloves Large Blue", key="rec_item")
+    known_items = get_known_items()
+    item = st.text_input("Item", placeholder="e.g. Nitrile Examination Gloves - Large Blue", key="rec_item")
     
     qty = st.number_input("Quantity Received", min_value=0, step=1, key="rec_qty")
     
@@ -191,7 +197,7 @@ with tab_in:
 with tab_out:
     st.subheader("Goods Out")
     
-    item = st.text_input("Item", placeholder="e.g. Nitrile Gloves Large Blue", key="out_item")
+    item = st.text_input("Item", placeholder="e.g. Nitrile Examination Gloves - Large Blue", key="out_item")
     
     current = get_current_stock(item) if item.strip() else 0
     st.markdown(f'<div class="stock-big">{current:,}</div>', unsafe_allow_html=True)
@@ -199,7 +205,7 @@ with tab_out:
     
     qty_out = st.number_input("Quantity Leaving", min_value=0, step=1, key="out_qty")
     
-    client = st.text_input("Client / Site", placeholder="e.g. Client XYZ", key="out_client")
+    client = st.text_input("Client / Site", placeholder="e.g. Client XYZ - Johannesburg", key="out_client")
     client_ref = st.text_input("PO / Order Ref", placeholder="e.g. PO-2026-045", key="out_ref")
     
     if st.button("Confirm Out", type="primary", use_container_width=True):
@@ -229,9 +235,14 @@ with tab_out:
 # TAB: HISTORY
 # ────────────────────────────────────────────────
 with tab_history:
-    st.subheader("History")
+    st.subheader("Movement History")
     
-    logs = pd.read_sql("SELECT * FROM movements ORDER BY timestamp DESC LIMIT 100", db)
+    logs = pd.read_sql("""
+        SELECT timestamp, type, item_name, quantity, reference, party, user
+        FROM movements 
+        ORDER BY timestamp DESC 
+        LIMIT 100
+    """, db)
     
     if logs.empty:
         st.info("No movements yet.")
@@ -239,19 +250,18 @@ with tab_history:
         logs['type'] = logs['type'].replace({'receive': 'IN', 'out': 'OUT'})
         logs['quantity'] = logs['quantity'].apply(lambda x: f"+{x:,}" if x > 0 else f"{x:,}")
         
-        st.dataframe(logs[['timestamp', 'type', 'item_name', 'quantity', 'reference', 'party', 'user']], 
-                     use_container_width=True, hide_index=True)
+        st.dataframe(logs, use_container_width=True, hide_index=True)
 
 # ────────────────────────────────────────────────
 # SIDEBAR
 # ────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("### MEKGORO CONSULTING")
-    st.write(f"**User:** {st.session_state.user}")
+    st.write(f"**Logged in as:** {st.session_state.user}")
     if st.button("Logout", use_container_width=True):
         for key in list(st.session_state.keys()):
             del st.session_state[key]
         st.rerun()
     st.markdown("---")
-    st.caption("Inventory – Receive & Out")
+    st.caption("Simple Inventory – Receive & Release")
     st.caption(datetime.now().strftime("%Y-%m-%d %H:%M"))
