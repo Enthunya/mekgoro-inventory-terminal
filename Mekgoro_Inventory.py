@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 from datetime import datetime
-import os
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
@@ -65,12 +64,20 @@ def init_db():
             added_date TEXT
         )
     """)
+    # New: known items master list (for dropdown + synonym linking later)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS known_items (
+            canonical_name TEXT PRIMARY KEY,
+            added_date TEXT,
+            notes TEXT
+        )
+    """)
     db.commit()
 
 init_db()
 
 # ────────────────────────────────────────────────
-# GOOGLE DRIVE AUTH
+# GOOGLE DRIVE AUTH (backup only)
 # ────────────────────────────────────────────────
 drive_service = None
 if "gcp_service_account" in st.secrets:
@@ -86,47 +93,23 @@ if "gcp_service_account" in st.secrets:
         st.error(f"Google Drive connection failed: {e}")
 
 # ────────────────────────────────────────────────
-# LOAD ITEMS - Improved detection & debug
+# LOAD KNOWN ITEMS FOR DROPDOWN
 # ────────────────────────────────────────────────
-@st.cache_data(ttl=3600)
-def load_items():
-    file_path = "ItemListingReport.xlsx"
-    
-    if not os.path.exists(file_path):
-        st.error("❌ ItemListingReport.xlsx NOT FOUND in app folder. Please upload it to your repository.")
-        return []
-    
+def get_known_items():
+    df = pd.read_sql("SELECT canonical_name FROM known_items ORDER BY canonical_name", db)
+    return df['canonical_name'].tolist() if not df.empty else []
+
+def add_known_item(name):
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
-        df = pd.read_excel(file_path, dtype=str)
-        
-        # Show columns for debugging
-        st.markdown("**Debug: Excel columns found**")
-        st.write(list(df.columns))
-        
-        # Flexible column detection
-        possible_cols = [col for col in df.columns 
-                        if any(kw in str(col).lower() for kw in ['desc', 'description', 'product', 'item', 'name'])]
-        
-        if possible_cols:
-            desc_col = possible_cols[0]
-            st.success(f"Using column: **{desc_col}** for item names")
-            items = df[desc_col].dropna().astype(str).str.strip().unique().tolist()
-            valid = [i for i in items if i and len(i) > 3 and "cement" not in i.lower()]
-            if valid:
-                st.write(f"Loaded **{len(valid)}** real items")
-                return sorted(valid)
-        
-        st.error("Could not find a description/product column. Please check column names above.")
-        return []
-    
-    except Exception as e:
-        st.error(f"Failed to read Excel: {str(e)}")
-        return []
-
-items_list = load_items()
+        db.execute("INSERT OR IGNORE INTO known_items (canonical_name, added_date) VALUES (?, ?)", (name.strip(), now))
+        db.commit()
+        return True
+    except:
+        return False
 
 # ────────────────────────────────────────────────
-# SUPPLIER FUNCTIONS
+# SUPPLIER FUNCTIONS (unchanged but kept)
 # ────────────────────────────────────────────────
 def get_suppliers():
     df = pd.read_sql("SELECT name FROM suppliers ORDER BY name", db)
@@ -142,7 +125,7 @@ def add_supplier(name, contact_person="", phone="", email="", address="", vat_nu
         db.commit()
         return True
     except sqlite3.IntegrityError:
-        return False  # duplicate
+        return False
 
 # ────────────────────────────────────────────────
 # LOGIN
@@ -163,36 +146,32 @@ st.markdown("<h3 style='text-align: center; color: #006400;'>MEKGORO CONSULTING<
 st.title(f"🏗️ Mekgoro Terminal | {st.session_state.user}")
 
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-    "📊 Inventory & Alerts",
+    "📊 Inventory",
     "📦 Receive Goods",
     "🛒 Purchase Orders",
-    "📤 Sell / Client PO",
+    "📤 Sell",
     "📜 History",
     "⚙️ Backup",
-    "🏢 Suppliers"
+    "🏢 Suppliers & Items"
 ])
 
 # ────────────────────────────────────────────────
 # HELPERS
 # ────────────────────────────────────────────────
-def get_current_qty(item_name):
-    res = pd.read_sql("SELECT qty FROM assets WHERE item_name = ?", db, params=(item_name,))
-    return res.iloc[0]['qty'] if not res.empty else 0
-
 def update_stock_and_log(item, qty_change, action_type, reference="", supplier=""):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     db.execute("""
         INSERT OR REPLACE INTO assets (item_name, qty, last_update)
         VALUES (?, COALESCE((SELECT qty FROM assets WHERE item_name=?), 0) + ?, ?)
-    """, (item, item, qty_change, now))
+    """, (item.strip(), item.strip(), qty_change, now))
     db.execute("""
         INSERT INTO logs (type, item_name, qty, user, reference, supplier, timestamp)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (action_type, item, qty_change, st.session_state.user, reference, supplier, now))
+    """, (action_type, item.strip(), qty_change, st.session_state.user, reference, supplier, now))
     db.commit()
 
 # ────────────────────────────────────────────────
-# TAB 1: INVENTORY + ALERTS
+# TAB 1: INVENTORY
 # ────────────────────────────────────────────────
 with tab1:
     st.subheader("Current Stock")
@@ -201,122 +180,95 @@ with tab1:
     if df.empty:
         st.info("No stock recorded yet.")
     else:
-        def highlight_low(row):
-            if row['qty'] <= 0:
-                return ['background-color: #ffebee'] * len(row)
-            if row['qty'] <= 10:
-                return ['background-color: #fff3cd'] * len(row)
+        def highlight(row):
+            if row['qty'] <= 0: return ['background-color: #ffebee'] * len(row)
+            if row['qty'] <= 10: return ['background-color: #fff3cd'] * len(row)
             return [''] * len(row)
         
-        st.dataframe(
-            df.style.apply(highlight_low, axis=1).format({"qty": "{:,.0f}"}),
-            use_container_width=True
-        )
-
-    st.subheader("Low Stock Alerts")
-    low = df[df['qty'] <= 10]
-    if low.empty:
-        st.success("No low stock items.")
-    else:
-        for _, row in low.iterrows():
-            st.markdown(f"""
-                <div class="alert">
-                <strong>{row['item_name']}</strong>: {row['qty']:,} units (updated {row['last_update']})
-                </div>
-            """, unsafe_allow_html=True)
+        st.dataframe(df.style.apply(highlight, axis=1).format({"qty": "{:,.0f}"}), use_container_width=True)
 
 # ────────────────────────────────────────────────
-# TAB 2: RECEIVE GOODS – Multi-line + Supplier contact
+# TAB 2: RECEIVE GOODS – with new item detection
 # ────────────────────────────────────────────────
 with tab2:
     st.subheader("Receive Goods from Supplier")
     
     suppliers_list = get_suppliers()
-    if not suppliers_list:
-        st.warning("No suppliers added yet. Go to Suppliers tab → Add New Supplier first.")
+    known_items = get_known_items()
     
     with st.form("receive_form"):
-        supplier_name = st.selectbox("Select Supplier", suppliers_list if suppliers_list else ["No suppliers yet"])
+        supplier = st.selectbox("Supplier", suppliers_list if suppliers_list else ["Add supplier first"])
+        ref = st.text_input("Invoice / SO / Delivery Ref")
         
-        if supplier_name and supplier_name != "No suppliers yet":
-            sup = pd.read_sql("SELECT * FROM suppliers WHERE name = ?", db, params=(supplier_name,))
-            if not sup.empty:
-                r = sup.iloc[0]
-                st.markdown(f"""
-                    <div class="supplier-card">
-                    <strong>{r['name']}</strong><br>
-                    Phone: {r['phone'] or '—'}<br>
-                    Email: {r['email'] or '—'}<br>
-                    Address: {r['address'] or '—'}<br>
-                    VAT: {r['vat_number'] or '—'}<br>
-                    Bank: {r['bank_account'] or '—'} ({r['bank_branch'] or ''})<br>
-                    SWIFT: {r['swift_code'] or '—'}
-                    </div>
-                """, unsafe_allow_html=True)
+        # Item input with search + new item handling
+        item_input = st.text_input("Item Description (search or type new)", key="receive_item_input")
         
-        ref = st.text_input("Invoice / SO / Delivery Ref (e.g. ION127436)")
+        matched = None
+        if item_input:
+            matches = [i for i in known_items if item_input.lower() in i.lower()]
+            if matches:
+                matched = st.selectbox("Matching known items", ["Use new name"] + matches)
         
-        col1, col2 = st.columns(2)
-        with col1:
-            item = st.selectbox("Item", items_list if items_list else ["No items loaded – check Excel"])
-        with col2:
-            qty = st.number_input("Received Quantity", min_value=1, step=1)
+        final_item = matched if matched and matched != "Use new name" else item_input.strip()
+        
+        if final_item and final_item not in known_items and final_item:
+            if st.checkbox("Save this as new known item?", value=True):
+                add_known_item(final_item)
+                st.info(f"Added '{final_item}' to known items")
+        
+        qty = st.number_input("Received Quantity", min_value=1, step=1)
         
         if st.form_submit_button("Receive"):
-            if not items_list:
-                st.error("No items available. Please fix ItemListingReport.xlsx loading.")
-            elif not supplier_name or supplier_name == "No suppliers yet":
-                st.error("Please select a supplier first.")
+            if not final_item:
+                st.error("Enter an item description")
+            elif not supplier or supplier == "Add supplier first":
+                st.error("Select a supplier")
             else:
-                update_stock_and_log(item, qty, "receive", ref, supplier_name)
-                st.success(f"Received {qty:,} × {item} from {supplier_name}")
+                update_stock_and_log(final_item, qty, "receive", ref, supplier)
+                st.success(f"Received {qty:,} × {final_item}")
                 st.rerun()
 
 # ────────────────────────────────────────────────
-# TAB 7: SUPPLIERS – Add / View
+# TAB 7: SUPPLIERS & ITEMS MANAGEMENT
 # ────────────────────────────────────────────────
 with tab7:
-    st.subheader("Manage Suppliers")
+    tab_s, tab_i = st.tabs(["Suppliers", "Known Items"])
     
-    with st.form("add_supplier"):
-        name = st.text_input("Supplier Name *", placeholder="OMNISURGE (PTY) LTD")
-        contact_person = st.text_input("Contact Person")
-        phone = st.text_input("Phone", placeholder="+27 21 551 3655")
-        email = st.text_input("Email", placeholder="queries@omnisurge.co.za")
-        address = st.text_area("Address", placeholder="Unit 3, Radio Park, Marconi Road, Montague Gardens, Cape Town")
-        vat_number = st.text_input("VAT Number", placeholder="2007/004914/07")
-        bank_account = st.text_input("Bank Account Number")
-        bank_branch = st.text_input("Branch Code")
-        swift_code = st.text_input("SWIFT Code", placeholder="FIRNZAJJ")
-        notes = st.text_area("Notes")
+    with tab_s:
+        st.subheader("Add / Manage Suppliers")
+        with st.form("add_supplier"):
+            name = st.text_input("Name *")
+            phone = st.text_input("Phone")
+            email = st.text_input("Email")
+            address = st.text_area("Address")
+            vat = st.text_input("VAT Number")
+            bank_acc = st.text_input("Bank Account")
+            branch = st.text_input("Branch Code")
+            swift = st.text_input("SWIFT")
+            
+            if st.form_submit_button("Add"):
+                if add_supplier(name, phone=phone, email=email, address=address, vat_number=vat, bank_account=bank_acc, bank_branch=branch, swift_code=swift):
+                    st.success("Supplier added")
+                else:
+                    st.error("Name already exists")
         
-        if st.form_submit_button("Add Supplier"):
-            if not name.strip():
-                st.error("Name is required")
-            elif add_supplier(name.strip(), contact_person, phone, email, address, vat_number, bank_account, bank_branch, swift_code, notes):
-                st.success(f"Added: {name}")
-            else:
-                st.error("Supplier name already exists")
-            st.rerun()
+        st.dataframe(pd.read_sql("SELECT name, phone, email FROM suppliers", db), use_container_width=True)
     
-    st.subheader("Existing Suppliers")
-    sup_df = pd.read_sql("SELECT name, phone, email, vat_number FROM suppliers ORDER BY name", db)
-    if sup_df.empty:
-        st.info("No suppliers yet. Add one above.")
-    else:
-        st.dataframe(sup_df, use_container_width=True)
+    with tab_i:
+        st.subheader("Known Items (used in dropdown)")
+        items_df = pd.read_sql("SELECT canonical_name, added_date FROM known_items ORDER BY canonical_name", db)
+        st.dataframe(items_df, use_container_width=True)
+        
+        st.caption("Items are added automatically when you receive or sell something new.")
 
 # ────────────────────────────────────────────────
-# Remaining tabs (add as needed from previous versions)
-# Sell, Purchase Orders, History, Backup
+# OTHER TABS (sell, history, backup, etc.) – add as needed
 # ────────────────────────────────────────────────
-# ... paste here if you want them back
 
 # SIDEBAR
 with st.sidebar:
     st.markdown("### MEKGORO CONSULTING")
-    st.write(f"**User:** {st.session_state.user}")
+    st.write(f"User: {st.session_state.user}")
     if st.button("Logout"):
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
+        del st.session_state["user"]
         st.rerun()
