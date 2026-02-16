@@ -3,265 +3,208 @@ import pandas as pd
 import sqlite3
 from datetime import datetime
 
-# ────────────────────────────────────────────────
-# PAGE CONFIG – Optimized for phones/tablets
-# ────────────────────────────────────────────────
+# Page config – mobile friendly
 st.set_page_config(
-    page_title="Mekgoro Inventory",
+    page_title="Mekgoro Stock",
     page_icon="logo.png",
     layout="wide",
-    initial_sidebar_state="collapsed"  # Collapsed by default on mobile
+    initial_sidebar_state="collapsed"  # good for phones
 )
 
-# Responsive styling
+# Basic styling – large buttons, readable on small screens
 st.markdown("""
     <style>
-    .stApp { background-color: #f8f9fa; padding: 10px; }
-    h1, h2, h3 { color: #006400; }
-    .logo-header { text-align: center; margin: 16px 0; }
-    .success-msg { background-color: #e8f5e9; padding: 16px; border-radius: 8px; margin: 16px 0; font-size: 16px; }
-    .warning-msg { background-color: #fff3cd; padding: 16px; border-radius: 8px; margin: 16px 0; font-size: 16px; }
-    .error-msg  { background-color: #ffebee;  padding: 16px; border-radius: 8px; margin: 16px 0; font-size: 16px; }
-    .stock-big  { font-size: 36px; font-weight: bold; color: #006400; text-align: center; margin: 20px 0; }
-    .metric-label { font-size: 16px; color: #555; text-align: center; }
-    
-    /* Mobile/tablet improvements */
-    @media (max-width: 768px) {
-        .logo-header img { width: 180px !important; }
-        h1 { font-size: 1.6rem !important; }
-        .stButton > button { 
-            width: 100%; 
-            height: 52px; 
-            font-size: 18px; 
-            margin: 10px 0;
-        }
-        .stTextInput > div > div > input,
-        .stNumberInput > div > div > input {
-            font-size: 18px;
-            padding: 12px;
-        }
-        .stTabs [data-baseweb="tab-list"] {
-            gap: 8px;
-        }
-        .stTabs [data-baseweb="tab"] {
-            font-size: 14px;
-            padding: 10px 12px;
-        }
+    .stApp { background-color: #f9f9f9; padding: 10px; }
+    h1, h2 { color: #006400; }
+    .stButton > button { 
+        width: 100%; 
+        height: 52px; 
+        font-size: 18px; 
+        margin: 10px 0;
     }
+    .stTextInput input, .stNumberInput input {
+        font-size: 18px;
+        padding: 12px;
+    }
+    .success { background: #e8f5e9; padding: 16px; border-radius: 8px; margin: 12px 0; }
+    .warning { background: #fff3cd; padding: 16px; border-radius: 8px; margin: 12px 0; }
+    .error   { background: #ffebee;  padding: 16px; border-radius: 8px; margin: 12px 0; }
+    .stock-number { font-size: 42px; font-weight: bold; color: #006400; text-align: center; margin: 20px 0; }
     </style>
 """, unsafe_allow_html=True)
 
-# ────────────────────────────────────────────────
-# DATABASE
-# ────────────────────────────────────────────────
-db = sqlite3.connect("mekgoro_inventory.db", check_same_thread=False)
+# Database – local file
+db = sqlite3.connect("mekgoro_stock.db", check_same_thread=False)
 
 def init_db():
     db.execute("""
         CREATE TABLE IF NOT EXISTS stock (
-            item_name TEXT PRIMARY KEY,
-            quantity INTEGER DEFAULT 0,
-            last_update TEXT
+            item TEXT PRIMARY KEY,
+            qty INTEGER DEFAULT 0,
+            last_updated TEXT
         )
     """)
     db.execute("""
-        CREATE TABLE IF NOT EXISTS movements (
+        CREATE TABLE IF NOT EXISTS log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            type TEXT,               -- 'receive' or 'out'
-            item_name TEXT,
-            quantity INTEGER,
-            reference TEXT,
-            party TEXT,              -- supplier or client
+            type TEXT,          -- 'receive' or 'out'
+            item TEXT,
+            qty INTEGER,
+            party TEXT,         -- supplier or client
+            ref TEXT,
             user TEXT,
-            timestamp TEXT
+            ts TEXT
         )
     """)
     db.commit()
 
 init_db()
 
-# ────────────────────────────────────────────────
-# HELPERS
-# ────────────────────────────────────────────────
-def get_current_stock(item_name):
-    row = pd.read_sql("SELECT quantity FROM stock WHERE item_name = ?", db, params=(item_name.strip(),))
-    return row.iloc[0]['quantity'] if not row.empty else 0
+# Helpers
+def get_qty(item):
+    row = pd.read_sql("SELECT qty FROM stock WHERE item = ?", db, params=(item.strip(),))
+    return row.iloc[0]['qty'] if not row.empty else 0
 
-def update_stock(item_name, qty_change, movement_type, reference="", party=""):
-    item_name = item_name.strip()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    user = st.session_state.user
-    
+def change_stock(item, delta, typ, party="", ref=""):
+    item = item.strip()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    user = st.session_state.get("user", "Unknown")
+
     db.execute("""
-        INSERT OR REPLACE INTO stock (item_name, quantity, last_update)
-        VALUES (?, COALESCE((SELECT quantity FROM stock WHERE item_name=?), 0) + ?, ?)
-    """, (item_name, item_name, qty_change, now))
-    
+        INSERT OR REPLACE INTO stock (item, qty, last_updated)
+        VALUES (?, COALESCE((SELECT qty FROM stock WHERE item=?), 0) + ?, ?)
+    """, (item, item, delta, now))
+
     db.execute("""
-        INSERT INTO movements (type, item_name, quantity, reference, party, user, timestamp)
+        INSERT INTO log (type, item, qty, party, ref, user, ts)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (movement_type, item_name, qty_change, reference, party, user, now))
-    
+    """, (typ, item, delta, party, ref, user, now))
+
     db.commit()
 
-def get_known_items():
-    df = pd.read_sql("SELECT DISTINCT item_name FROM stock ORDER BY item_name", db)
-    return df['item_name'].tolist() if not df.empty else []
+def known_items():
+    df = pd.read_sql("SELECT DISTINCT item FROM stock ORDER BY item", db)
+    return df['item'].tolist() if not df.empty else []
 
-# ────────────────────────────────────────────────
-# LOGIN SCREEN WITH LOGO
-# ────────────────────────────────────────────────
+# Login
 if "user" not in st.session_state:
-    st.markdown('<div class="logo-header">', unsafe_allow_html=True)
-    st.image("logo.png", width=240, use_column_width=False)
-    st.markdown("</div>", unsafe_allow_html=True)
-    st.markdown("<h3 style='text-align: center; color: #006400;'>MEKGORO CONSULTING</h3>", unsafe_allow_html=True)
-    st.title("Inventory Login")
-    
-    users = sorted(["Anthony", "Biino", "Mike", "Ndule", "Tshepo"])
-    user = st.selectbox("Select your name", users, key="login_user")
-    
-    if st.button("Login", type="primary", use_container_width=True):
-        st.session_state.user = user
+    st.image("logo.png", width=220)
+    st.markdown("<h3 style='text-align:center; color:#006400;'>MEKGORO CONSULTING</h3>", unsafe_allow_html=True)
+    st.title("Login")
+
+    users = ["Ndule", "Tshepo", "Biino", "Anthony", "Mike"]
+    u = st.selectbox("Who is using?", users, key="login_user")
+    if st.button("Enter", type="primary", use_container_width=True):
+        st.session_state.user = u
         st.rerun()
     st.stop()
 
-# ────────────────────────────────────────────────
-# MAIN PAGE WITH SMALLER LOGO
-# ────────────────────────────────────────────────
-st.markdown('<div class="logo-header">', unsafe_allow_html=True)
-st.image("logo.png", width=240, use_column_width=False)
-st.markdown("</div>", unsafe_allow_html=True)
-st.markdown("<h3 style='text-align: center; color: #006400;'>MEKGORO CONSULTING</h3>", unsafe_allow_html=True)
-st.title(f"Inventory – {st.session_state.user}")
+# Header on every page
+st.image("logo.png", width=220)
+st.markdown("<h3 style='text-align:center; color:#006400;'>MEKGORO CONSULTING</h3>", unsafe_allow_html=True)
+st.title(f"Stock – {st.session_state.user}")
 
-tab_stock, tab_in, tab_out, tab_history = st.tabs([
-    "📊 Stock",
-    "📥 Receive",
-    "📤 Out",
-    "📋 History"
-])
+tab_stock, tab_receive, tab_out, tab_log = st.tabs(
+    ["📊 Stock", "📥 Receive", "📤 Out", "📋 Log"]
+)
 
-# ────────────────────────────────────────────────
-# TAB: STOCK OVERVIEW
-# ────────────────────────────────────────────────
+# Stock tab
 with tab_stock:
-    st.subheader("Current Stock Levels")
-    
-    df = pd.read_sql("SELECT item_name, quantity, last_update FROM stock ORDER BY item_name", db)
-    
+    st.subheader("Current Stock")
+    df = pd.read_sql("SELECT item, qty, last_updated FROM stock ORDER BY item", db)
     if df.empty:
-        st.info("No items in stock yet. Start by receiving goods.")
+        st.info("No items yet – start receiving")
     else:
-        def color_qty(val):
-            if val <= 0: return 'color: red; font-weight: bold;'
-            if val <= 10: return 'color: #d97706; font-weight: bold;'
+        def color(v):
+            if v <= 0: return 'color:red; font-weight:bold;'
+            if v <= 10: return 'color:#d97706; font-weight:bold;'
             return ''
-        
-        styled = df.style.format({"quantity": "{:,}"}).map(color_qty, subset=["quantity"])
-        st.dataframe(styled, use_container_width=True, hide_index=True)
+        st.dataframe(
+            df.style.format({"qty": "{:,}"}).map(color, subset=["qty"]),
+            use_container_width=True,
+            hide_index=True
+        )
 
-# ────────────────────────────────────────────────
-# TAB: RECEIVE GOODS
-# ────────────────────────────────────────────────
-with tab_in:
+# Receive tab
+with tab_receive:
     st.subheader("Receive Goods")
-    
-    supplier = st.text_input("Supplier", placeholder="e.g. Omnisurge", key="rec_supplier")
-    ref = st.text_input("Invoice / Ref", placeholder="e.g. ION127436", key="rec_ref")
-    
-    known_items = get_known_items()
-    item = st.text_input("Item", placeholder="e.g. Nitrile Examination Gloves - Large Blue", key="rec_item")
-    
-    qty = st.number_input("Quantity Received", min_value=0, step=1, key="rec_qty")
-    
-    if st.button("Confirm Receive", type="primary", use_container_width=True):
+    supplier = st.text_input("Supplier", key="rec_sup")
+    ref = st.text_input("Invoice / Ref", key="rec_ref")
+    item = st.text_input("Item", placeholder="e.g. Nitrile Gloves Large Blue", key="rec_item")
+    qty = st.number_input("Qty Received", min_value=0, step=1, key="rec_qty")
+
+    if st.button("Receive", type="primary", use_container_width=True):
         item = item.strip()
         if not item:
-            st.markdown('<div class="warning-msg">Enter item description</div>', unsafe_allow_html=True)
+            st.markdown('<div class="warning-msg">Enter item name</div>', unsafe_allow_html=True)
         elif qty <= 0:
-            st.markdown('<div class="warning-msg">Quantity > 0 required</div>', unsafe_allow_html=True)
+            st.markdown('<div class="warning-msg">Qty > 0</div>', unsafe_allow_html=True)
         else:
-            update_stock(item, qty, "receive", ref, supplier)
+            change_stock(item, qty, "receive", ref, supplier)
             st.markdown(f"""
                 <div class="success-msg">
-                Received <b>{qty:,}</b> × <b>{item}</b> from <b>{supplier or 'Unknown'}</b><br>
-                Ref: {ref or 'None'}
+                Added {qty:,} × <b>{item}</b> from {supplier or 'Unknown'}<br>
+                Ref: {ref or '—'}
                 </div>
             """, unsafe_allow_html=True)
             st.rerun()
 
-# ────────────────────────────────────────────────
-# TAB: GOODS OUT
-# ────────────────────────────────────────────────
+# Out tab
 with tab_out:
     st.subheader("Goods Out")
+    item = st.text_input("Item", placeholder="e.g. Nitrile Gloves Large Blue", key="out_item")
     
-    item = st.text_input("Item", placeholder="e.g. Nitrile Examination Gloves - Large Blue", key="out_item")
+    curr = get_current_stock(item) if item.strip() else 0
+    st.markdown(f'<div class="stock-big">{curr:,}</div>', unsafe_allow_html=True)
+    st.markdown('<div class="metric-label">In stock right now</div>', unsafe_allow_html=True)
     
-    current = get_current_stock(item) if item.strip() else 0
-    st.markdown(f'<div class="stock-big">{current:,}</div>', unsafe_allow_html=True)
-    st.markdown('<div class="metric-label">Current Stock</div>', unsafe_allow_html=True)
-    
-    qty_out = st.number_input("Quantity Leaving", min_value=0, step=1, key="out_qty")
-    
-    client = st.text_input("Client / Site", placeholder="e.g. Client XYZ - Johannesburg", key="out_client")
-    client_ref = st.text_input("PO / Order Ref", placeholder="e.g. PO-2026-045", key="out_ref")
-    
+    qty = st.number_input("Qty Leaving", min_value=0, step=1, key="out_qty")
+    client = st.text_input("Client / Site", key="out_client")
+    ref = st.text_input("PO / Ref", key="out_ref")
+
     if st.button("Confirm Out", type="primary", use_container_width=True):
         item = item.strip()
         if not item:
-            st.markdown('<div class="warning-msg">Enter item description</div>', unsafe_allow_html=True)
-        elif qty_out <= 0:
-            st.markdown('<div class="warning-msg">Quantity > 0 required</div>', unsafe_allow_html=True)
-        elif current < qty_out:
+            st.markdown('<div class="warning-msg">Enter item</div>', unsafe_allow_html=True)
+        elif qty <= 0:
+            st.markdown('<div class="warning-msg">Qty > 0</div>', unsafe_allow_html=True)
+        elif curr < qty:
             st.markdown(f"""
                 <div class="error-msg">
-                Not enough stock!<br>
-                Only {current:,} available.
+                Not enough! Only {curr:,} in stock.
                 </div>
             """, unsafe_allow_html=True)
         else:
-            update_stock(item, -qty_out, "out", client_ref, client)
+            change_stock(item, -qty, "out", ref, client)
             st.markdown(f"""
                 <div class="success-msg">
-                Released <b>{qty_out:,}</b> × <b>{item}</b> to <b>{client or 'Unknown'}</b><br>
-                Ref: {client_ref or 'None'}
+                Removed {qty:,} × <b>{item}</b> for {client or 'Unknown'}<br>
+                Ref: {ref or '—'}
                 </div>
             """, unsafe_allow_html=True)
             st.rerun()
 
-# ────────────────────────────────────────────────
-# TAB: HISTORY
-# ────────────────────────────────────────────────
-with tab_history:
-    st.subheader("Movement History")
-    
-    logs = pd.read_sql("""
-        SELECT timestamp, type, item_name, quantity, reference, party, user
-        FROM movements 
-        ORDER BY timestamp DESC 
-        LIMIT 100
+# History tab
+with tab_log:
+    st.subheader("History")
+    df = pd.read_sql("""
+        SELECT ts, type, item_name, quantity, party, ref, user
+        FROM movements ORDER BY ts DESC LIMIT 50
     """, db)
-    
-    if logs.empty:
+    if df.empty:
         st.info("No movements yet.")
     else:
-        logs['type'] = logs['type'].replace({'receive': 'IN', 'out': 'OUT'})
-        logs['quantity'] = logs['quantity'].apply(lambda x: f"+{x:,}" if x > 0 else f"{x:,}")
-        
-        st.dataframe(logs, use_container_width=True, hide_index=True)
+        df['type'] = df['type'].replace({'receive': 'IN', 'out': 'OUT'})
+        df['quantity'] = df['quantity'].apply(lambda x: f"+{x:,}" if x > 0 else f"{x:,}")
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
-# ────────────────────────────────────────────────
-# SIDEBAR
-# ────────────────────────────────────────────────
+# Sidebar
 with st.sidebar:
-    st.markdown("### MEKGORO CONSULTING")
-    st.write(f"**Logged in as:** {st.session_state.user}")
+    st.markdown("**MEKGORO CONSULTING**")
+    st.write(f"User: **{st.session_state.user}**")
     if st.button("Logout", use_container_width=True):
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
+        for k in list(st.session_state.keys()):
+            del st.session_state[k]
         st.rerun()
-    st.markdown("---")
-    st.caption("Simple Inventory – Receive & Release")
+    st.caption("Receive / Out Tracker")
     st.caption(datetime.now().strftime("%Y-%m-%d %H:%M"))
